@@ -1,0 +1,34 @@
+import { Schema } from "effect"
+
+export const CommandType = Schema.Literal("claude", "codex", "opencode", "custom")
+export type CommandType = typeof CommandType.Type
+
+export const WorktreeStatus = Schema.Literal("active", "merged", "archived")
+export type WorktreeStatus = typeof WorktreeStatus.Type
+
+export class Project extends Schema.Class<Project>("Project")({
+  id: Schema.String,
+  name: Schema.String,
+  repoPath: Schema.String,
+  setupScript: Schema.optionalWith(Schema.Array(Schema.String), { default: () => [] }),
+  defaultCommand: Schema.optionalWith(CommandType, { default: () => "claude" as const }),
+  customCommand: Schema.optional(Schema.String),
+}) {}
+
+export class WorktreeEntry extends Schema.Class<WorktreeEntry>("WorktreeEntry")({
+  id: Schema.String,
+  projectId: Schema.String,
+  branchName: Schema.String,
+  path: Schema.String,
+  displayName: Schema.String,
+  description: Schema.optionalWith(Schema.String, { default: () => "" }),
+  status: Schema.optionalWith(WorktreeStatus, { default: () => "active" as const }),
+  createdAt: Schema.String,
+  updatedAt: Schema.String,
+  sortOrder: Schema.optional(Schema.Number),
+}) {}
+
+export class LitetreeConfig extends Schema.Class<LitetreeConfig>("LitetreeConfig")({
+  projects: Schema.optionalWith(Schema.Array(Project), { default: () => [] }),
+  worktrees: Schema.optionalWith(Schema.Array(WorktreeEntry), { default: () => [] }),
+}) {}

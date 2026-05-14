@@ -1,0 +1,971 @@
+import { Effect } from "effect"
+import * as path from "node:path"
+import * as fs from "node:fs"
+import { homedir } from "node:os"
+import { ProjectService } from "./services/ProjectService.js"
+import { WorktreeService } from "./services/WorktreeService.js"
+import { PtyService } from "./services/PtyService.js"
+import { SetupService } from "./services/SetupService.js"
+import { DatabaseService } from "./services/DatabaseService.js"
+import { generateBranchName } from "./utils/names.js"
+import { detectEditors, openEditor, type EditorOption } from "./utils/editors.js"
+import type { Project, WorktreeEntry, CommandType } from "./models/Config.js"
+import {
+  paintFrame,
+  ALT_SCREEN_ON,
+  ALT_SCREEN_OFF,
+  SHOW_CURSOR,
+  SGR_RESET,
+  MOUSE_ON,
+  MOUSE_OFF,
+  BPASTE_ON,
+  BPASTE_OFF,
+  SIDEBAR_WIDTH,
+  type ModalState,
+} from "./renderer.js"
+
+export const startApp = Effect.gen(function* () {
+  const projectSvc = yield* ProjectService
+  const worktreeSvc = yield* WorktreeService
+  const ptySvc = yield* PtyService
+  const setupSvc = yield* SetupService
+  const dbSvc = yield* DatabaseService
+
+  yield* Effect.tryPromise({
+    try: () => bootstrap(projectSvc, worktreeSvc, ptySvc, setupSvc, dbSvc),
+    catch: (e) => new Error(`Failed to start: ${e}`),
+  })
+
+  yield* Effect.never
+})
+
+type Svc<T> = T extends import("effect").Context.Tag<any, infer S> ? S : never
+type ProjSvc = Svc<typeof ProjectService>
+type WtSvc = Svc<typeof WorktreeService>
+type PtySvc = Svc<typeof PtyService>
+type SetSvc = Svc<typeof SetupService>
+type DbSvc = Svc<typeof DatabaseService>
+
+async function bootstrap(
+  projectSvc: ProjSvc,
+  worktreeSvc: WtSvc,
+  ptySvc: PtySvc,
+  setupSvc: SetSvc,
+  dbSvc: DbSvc,
+) {
+  const SETTING_LAST_ACTIVE = "last_active_worktree_id"
+
+  const expandTilde = (input: string): string =>
+    input.startsWith("~/") ? path.join(homedir(), input.slice(2)) : input
+
+  // Filesystem tab-completion: completes the common prefix of matching
+  // entries in the indicated directory. Appends "/" when the unique match
+  // is a directory so users can keep tabbing deeper.
+  const completePath = (input: string): string => {
+    if (!input) return input
+    const lookup = expandTilde(input)
+    const endsWithSlash = lookup.endsWith("/")
+    const dir = endsWithSlash ? lookup : path.dirname(lookup)
+    const prefix = endsWithSlash ? "" : path.basename(lookup)
+    const head = endsWithSlash ? input : input.slice(0, input.length - prefix.length)
+    try {
+      const entries = fs.readdirSync(dir).filter(e => e.startsWith(prefix))
+      if (entries.length === 0) return input
+      let common = entries[0]!
+      for (const e of entries.slice(1)) {
+        let i = 0
+        while (i < common.length && i < e.length && common[i] === e[i]) i++
+        common = common.slice(0, i)
+      }
+      let completed = head + common
+      if (entries.length === 1) {
+        try {
+          if (fs.statSync(path.join(dir, entries[0]!)).isDirectory() && !completed.endsWith("/")) {
+            completed += "/"
+          }
+        } catch {}
+      }
+      return completed
+    } catch {
+      return input
+    }
+  }
+
+  // Strip control characters so pasted text doesn't smuggle in escapes.
+  const filterPrintable = (s: string): string => s.replace(/[\x00-\x1f\x7f]/g, "")
+
+  const getSetting = (key: string): string | null => {
+    const row = dbSvc.db.query("SELECT value FROM app_settings WHERE key = ?").get(key) as { value: string } | null
+    return row?.value ?? null
+  }
+
+  const setSetting = (key: string, value: string) => {
+    dbSvc.db.query("INSERT INTO app_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value)
+  }
+  let focus: "sidebar" | "terminal" | "modal" = "sidebar"
+  let selectedIndex = 0
+  let activeWorktreeId: string | null = null
+  let modal: ModalState = { type: "none" }
+  let projects: Project[] = []
+  let worktrees: WorktreeEntry[] = []
+  let availableEditors: EditorOption[] = []
+  let running = true
+  let dirty = true
+  let inlineEdit: { worktreeId: string; value: string } | null = null
+  let lastSidebarClick: { y: number; time: number } | null = null
+  const scrollOffsets = new Map<string, number>()
+  // PR detection (via `gh pr list`). null = checked, no PR; undefined = not checked yet.
+  const prNumbers = new Map<string, number | null>()
+  const prFetchedAt = new Map<string, number>()
+  const PR_CACHE_MS = 5 * 60 * 1000
+  let ghAvailable: boolean | null = null
+  // Setup script status per worktree. "running" while scripts execute,
+  // dropped from the map when finished.
+  const setupRunning = new Set<string>()
+
+  const showErrorModal = (title: string, message: string) => {
+    focus = "modal"
+    modal = { type: "error", title, message }
+    markDirty()
+  }
+
+  // Brief status message shown in the detail bar; auto-clears after 2s.
+  let toastMessage: string | null = null
+  let toastUntil = 0
+  const showToast = (msg: string, durationMs = 2000) => {
+    toastMessage = msg
+    toastUntil = Date.now() + durationMs
+    markDirty()
+    setTimeout(() => {
+      if (Date.now() >= toastUntil) {
+        toastMessage = null
+        markDirty()
+      }
+    }, durationMs + 50)
+  }
+
+  // OSC 52: universal terminal clipboard escape. Works in iTerm2,
+  // Terminal.app, kitty, alacritty, wezterm — no external command needed.
+  const copyToClipboard = (text: string) => {
+    const b64 = Buffer.from(text, "utf-8").toString("base64")
+    process.stdout.write(`\x1b]52;c;${b64}\x07`)
+  }
+
+  const markDirty = () => { dirty = true }
+
+  const cols = () => process.stdout.columns || 80
+  const rows = () => process.stdout.rows || 24
+  const termCols = () => cols() - SIDEBAR_WIDTH - 1
+  const termRows = () => rows() - 2
+
+  const refresh = async () => {
+    projects = [...await Effect.runPromise(projectSvc.list())]
+    worktrees = [...await Effect.runPromise(worktreeSvc.list())]
+    // Kick off PR checks in the background; don't block UI.
+    fetchAllPRs()
+  }
+
+  const checkGhAvailable = async (): Promise<boolean> => {
+    if (ghAvailable !== null) return ghAvailable
+    try {
+      const proc = Bun.spawn(["which", "gh"], { stdout: "ignore", stderr: "ignore" })
+      ghAvailable = (await proc.exited) === 0
+    } catch {
+      ghAvailable = false
+    }
+    return ghAvailable
+  }
+
+  const fetchPR = async (wt: WorktreeEntry) => {
+    if (!(await checkGhAvailable())) return
+    const now = Date.now()
+    const last = prFetchedAt.get(wt.id) ?? 0
+    if (now - last < PR_CACHE_MS) return
+    prFetchedAt.set(wt.id, now)
+    try {
+      const proc = Bun.spawn(
+        ["gh", "pr", "list", "--head", wt.branchName, "--json", "number", "--limit", "1", "--state", "all"],
+        { cwd: wt.path, stdout: "pipe", stderr: "pipe" },
+      )
+      const exit = await proc.exited
+      if (exit !== 0) {
+        // Not a github repo, gh not authed, or branch has no PR — record null.
+        if (prNumbers.get(wt.id) !== null) {
+          prNumbers.set(wt.id, null)
+          markDirty()
+        }
+        return
+      }
+      const stdout = await new Response(proc.stdout).text()
+      const arr = JSON.parse(stdout) as { number: number }[]
+      const num = arr[0]?.number ?? null
+      if (prNumbers.get(wt.id) !== num) {
+        prNumbers.set(wt.id, num)
+        markDirty()
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const fetchAllPRs = () => {
+    for (const wt of worktrees) {
+      if (wt.status === "active") void fetchPR(wt)
+    }
+  }
+
+  const activeHandle = () => activeWorktreeId ? ptySvc.get(activeWorktreeId) ?? null : null
+
+  const sessionStartedKey = (worktreeId: string) => `session_started_${worktreeId}`
+
+  const resolveCmd = (p: Project, worktreeId: string): [string, string[]] => {
+    const resumed = getSetting(sessionStartedKey(worktreeId)) === "1"
+    switch (p.defaultCommand) {
+      case "claude": {
+        // --continue picks up the most recent conversation in the worktree
+        // directory. Skip on first spawn (no session exists yet).
+        const args = ["--dangerously-skip-permissions"]
+        if (resumed) args.push("--continue")
+        return ["claude", args]
+      }
+      case "codex": return ["codex", ["--full-auto"]]
+      case "opencode": return ["opencode", []]
+      case "custom":
+        if (p.customCommand) {
+          const parts = p.customCommand.split(" ")
+          return [parts[0]!, parts.slice(1)]
+        }
+        return ["bash", []]
+      default: return ["bash", []]
+    }
+  }
+
+  const spawnPty = async (worktreeId: string) => {
+    if (ptySvc.get(worktreeId)) return
+    const wt = worktrees.find(w => w.id === worktreeId)
+    if (!wt) return
+    const project = projects.find(p => p.id === wt.projectId)
+    if (!project) return
+    const [cmd, args] = resolveCmd(project, worktreeId)
+    await Effect.runPromise(
+      ptySvc.spawn({
+        worktreeId,
+        command: cmd,
+        args,
+        cols: termCols(),
+        rows: termRows(),
+        cwd: wt.path,
+      })
+    )
+    // Mark the session as started so the next spawn uses --continue.
+    setSetting(sessionStartedKey(worktreeId), "1")
+  }
+
+  const currentScrollOffset = () =>
+    activeWorktreeId ? scrollOffsets.get(activeWorktreeId) ?? 0 : 0
+
+  const setScrollOffset = (v: number) => {
+    if (!activeWorktreeId) return
+    const h = activeHandle()
+    const max = h ? Math.max(0, ((h.terminal.buffer.active as any).baseY ?? 0)) : 0
+    const clamped = Math.max(0, Math.min(max, v))
+    scrollOffsets.set(activeWorktreeId, clamped)
+  }
+
+  const paint = () => {
+    if (!running) return
+    const h = activeHandle()
+    if (h && h.dirtyLines.size > 0) dirty = true
+    // Keep painting while any setup script is running so its spinner animates.
+    if (setupRunning.size > 0) dirty = true
+    if (!dirty) return
+    dirty = false
+
+    const frame = paintFrame({
+      worktrees,
+      projects,
+      selectedIndex,
+      activeWorktreeId,
+      focus: modal.type !== "none" ? "modal" : focus,
+      modal,
+      handle: h,
+      availableEditors,
+      cols: cols(),
+      rows: rows(),
+      scrollOffset: currentScrollOffset(),
+      inlineEdit,
+      prNumbers,
+      setupRunning,
+      toast: toastMessage && Date.now() < toastUntil ? toastMessage : null,
+    })
+    process.stdout.write(frame)
+  }
+
+  const cleanup = () => {
+    running = false
+    clearInterval(paintLoop)
+    for (const id of ptySvc.listActive()) {
+      Effect.runSync(ptySvc.kill(id))
+    }
+    process.stdout.write(BPASTE_OFF + MOUSE_OFF + ALT_SCREEN_OFF + SHOW_CURSOR + SGR_RESET)
+    if (process.stdin.isTTY) process.stdin.setRawMode(false)
+    process.stdin.pause()
+  }
+
+  const quit = () => {
+    cleanup()
+    process.exit(0)
+  }
+
+  const createWorktree = async (projectId: string) => {
+    const branch = generateBranchName()
+    const project = projects.find(p => p.id === projectId)
+    if (!project) return
+
+    let newId: string | null = null
+    await Effect.runPromise(
+      worktreeSvc.create({ projectId, branchName: branch })
+        .pipe(
+          Effect.tap((entry: WorktreeEntry) => Effect.sync(() => { newId = entry.id })),
+          Effect.catchAll(() => Effect.void),
+        )
+    )
+    if (!newId) return
+
+    await refresh()
+    activeWorktreeId = newId
+    setSetting(SETTING_LAST_ACTIVE, newId)
+    selectedIndex = worktrees.findIndex(w => w.id === newId)
+    if (selectedIndex < 0) selectedIndex = 0
+
+    try { await spawnPty(newId) } catch {}
+    focus = activeHandle() ? "terminal" : "sidebar"
+
+    if (project.setupScript.length > 0) {
+      const wtId = newId
+      const wtPath = worktrees.find(w => w.id === wtId)!.path
+      setupRunning.add(wtId)
+      markDirty()
+      // Run scripts in background; show error modal on failure.
+      Effect.runPromise(setupSvc.runSetup(wtPath, project.setupScript))
+        .then(() => {
+          setupRunning.delete(wtId)
+          markDirty()
+        })
+        .catch((err) => {
+          setupRunning.delete(wtId)
+          const msg = err?.message ?? String(err)
+          showErrorModal(
+            `Setup script failed for ${project.name}`,
+            `Path: ${wtPath}\n\n${msg}`,
+          )
+        })
+    }
+  }
+
+  const startOnboarding = () => {
+    focus = "modal"
+    modal = {
+      type: "input",
+      title: "Local path to git repo on your machine (Tab to complete, ~ supported)",
+      placeholder: "/Users/you/code/myrepo",
+      value: "",
+      onSubmit: (rawPath) => {
+        const repoPath = expandTilde(rawPath)
+        const defaultName = path.basename(repoPath)
+        const defaultCmd = getGlobalDefaultCommand()
+        const defaultSetupScripts = getGlobalSetupScripts()
+        modal = {
+          type: "input",
+          title: "Project name",
+          placeholder: defaultName || "my-project",
+          value: defaultName,
+          onSubmit: (name) => {
+            const finalName = name || defaultName
+            const cmdOptions: CommandType[] = ["claude", "codex", "opencode", "custom"]
+            modal = {
+              type: "select",
+              title: `Default command (global default: ${defaultCmd})`,
+              options: cmdOptions as unknown as string[],
+              selectedIndex: Math.max(0, cmdOptions.indexOf(defaultCmd)),
+              onSelect: (command) => {
+                modal = {
+                  type: "textarea",
+                  title: "Setup scripts (one per line)",
+                  placeholder: defaultSetupScripts.join("\n") || "pnpm i\ncp .env .env.local",
+                  value: defaultSetupScripts.join("\n"),
+                  onSubmit: (setup) => {
+                    modal = { type: "none" }
+                    focus = "sidebar"
+                    const name = finalName
+                    const setupScript = setup
+                      ? setup.split("\n").map(s => s.trim()).filter(Boolean)
+                      : []
+                    Effect.runPromise(
+                      projectSvc.add({
+                        name,
+                        repoPath,
+                        setupScript,
+                        defaultCommand: command as CommandType,
+                      }).pipe(Effect.catchAll(() => Effect.succeed(null)))
+                    ).then(async (project: Project | null) => {
+                      if (project) {
+                        await refresh()
+                        await createWorktree(project.id)
+                      }
+                    })
+                  },
+                }
+              },
+            }
+          },
+        }
+      },
+    }
+  }
+
+  const NEW_PROJECT_OPTION = "+ New project…"
+
+  const handleNew = () => {
+    if (projects.length === 0) {
+      startOnboarding()
+      return
+    }
+    focus = "modal"
+    modal = {
+      type: "select",
+      title: "Select project (or add new)",
+      options: [...projects.map(p => p.name), NEW_PROJECT_OPTION],
+      selectedIndex: 0,
+      onSelect: (name) => {
+        modal = { type: "none" }
+        focus = "sidebar"
+        if (name === NEW_PROJECT_OPTION) {
+          startOnboarding()
+          return
+        }
+        const project = projects.find(p => p.name === name)
+        if (project) createWorktree(project.id)
+      },
+    }
+  }
+
+  const handleArchive = () => {
+    const wt = worktrees[selectedIndex]
+    if (!wt) return
+    focus = "modal"
+    modal = {
+      type: "confirm",
+      title: "Archive worktree",
+      message: `Archive "${wt.displayName}"? (y/n)`,
+      onConfirm: async () => {
+        modal = { type: "none" }
+        focus = "sidebar"
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            yield* ptySvc.kill(wt.id)
+            yield* worktreeSvc.archive(wt.id)
+          }).pipe(Effect.catchAll(() => Effect.void))
+        )
+        if (activeWorktreeId === wt.id) activeWorktreeId = null
+        await refresh()
+        selectedIndex = Math.max(0, Math.min(selectedIndex, worktrees.length - 1))
+        if (worktrees.length > 0 && !activeWorktreeId) {
+          activeWorktreeId = worktrees[0]!.id
+        }
+      },
+    }
+  }
+
+  const handleEditorPicker = () => {
+    const wt = worktrees[selectedIndex]
+    if (!wt || availableEditors.length === 0) return
+    focus = "modal"
+    modal = { type: "editor-picker", worktreeId: wt.id, selectedIndex: 0 }
+  }
+
+  // --- Settings ---
+
+  const GLOBAL_DEFAULT_COMMAND = "global_default_command"
+  const GLOBAL_SETUP_SCRIPTS = "global_setup_scripts"
+
+  const getGlobalDefaultCommand = (): CommandType =>
+    (getSetting(GLOBAL_DEFAULT_COMMAND) as CommandType | null) ?? "claude"
+
+  const getGlobalSetupScripts = (): string[] => {
+    const v = getSetting(GLOBAL_SETUP_SCRIPTS)
+    try { return v ? (JSON.parse(v) as string[]) : [] } catch { return [] }
+  }
+
+  const editCommandModal = (
+    title: string,
+    current: CommandType,
+    onPick: (cmd: CommandType) => void,
+  ) => {
+    const options: CommandType[] = ["claude", "codex", "opencode", "custom"]
+    const startIdx = Math.max(0, options.indexOf(current))
+    focus = "modal"
+    modal = {
+      type: "select",
+      title,
+      options: options as unknown as string[],
+      selectedIndex: startIdx,
+      onSelect: (name) => {
+        modal = { type: "none" }
+        focus = "sidebar"
+        onPick(name as CommandType)
+        markDirty()
+      },
+    }
+  }
+
+  const editSetupModal = (
+    title: string,
+    current: readonly string[],
+    onSubmit: (scripts: string[]) => void,
+  ) => {
+    focus = "modal"
+    modal = {
+      type: "textarea",
+      title,
+      placeholder: "pnpm i\ncp .env .env.local",
+      value: current.join("\n"),
+      onSubmit: (text) => {
+        modal = { type: "none" }
+        focus = "sidebar"
+        const scripts = text ? text.split("\n").map(s => s.trim()).filter(Boolean) : []
+        onSubmit(scripts)
+        markDirty()
+      },
+    }
+  }
+
+  const handleProjectSettings = () => {
+    const wt = worktrees[selectedIndex]
+    if (!wt) return
+    const project = projects.find(p => p.id === wt.projectId)
+    if (!project) return
+
+    focus = "modal"
+    modal = {
+      type: "select",
+      title: `Settings for project: ${project.name}`,
+      options: ["Default command", "Setup scripts", "Cancel"],
+      selectedIndex: 0,
+      onSelect: (choice) => {
+        if (choice === "Default command") {
+          editCommandModal(`Default command for ${project.name}`, project.defaultCommand, (cmd) => {
+            Effect.runPromise(
+              projectSvc.update(project.id, { defaultCommand: cmd })
+                .pipe(Effect.catchAll(() => Effect.succeed(null as any)))
+            ).then(() => refresh()).then(markDirty)
+          })
+        } else if (choice === "Setup scripts") {
+          editSetupModal(`Setup scripts for ${project.name}`, project.setupScript, (scripts) => {
+            Effect.runPromise(
+              projectSvc.update(project.id, { setupScript: scripts })
+                .pipe(Effect.catchAll(() => Effect.succeed(null as any)))
+            ).then(() => refresh()).then(markDirty)
+          })
+        } else {
+          modal = { type: "none" }
+          focus = "sidebar"
+        }
+      },
+    }
+  }
+
+  const handleGlobalSettings = () => {
+    focus = "modal"
+    modal = {
+      type: "select",
+      title: "Global defaults (apply to new projects)",
+      options: ["Default command", "Setup scripts", "Cancel"],
+      selectedIndex: 0,
+      onSelect: (choice) => {
+        if (choice === "Default command") {
+          editCommandModal("Global default command", getGlobalDefaultCommand(), (cmd) => {
+            setSetting(GLOBAL_DEFAULT_COMMAND, cmd)
+          })
+        } else if (choice === "Setup scripts") {
+          editSetupModal("Global default setup scripts", getGlobalSetupScripts(), (scripts) => {
+            setSetting(GLOBAL_SETUP_SCRIPTS, JSON.stringify(scripts))
+          })
+        } else {
+          modal = { type: "none" }
+          focus = "sidebar"
+        }
+      },
+    }
+  }
+
+  // --- Input handling ---
+
+  // SGR mouse: \x1b[<button;col;row(M|m).  M = press/motion, m = release.
+  // Buttons: 0/1/2 = left/middle/right press, 64/65 = wheel up/down, 32+ = drag.
+  const MOUSE_RE = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/
+
+  const startInlineEdit = (worktreeId: string) => {
+    const wt = worktrees.find(w => w.id === worktreeId)
+    if (!wt) return
+    inlineEdit = { worktreeId, value: wt.displayName }
+    focus = "sidebar"
+    markDirty()
+  }
+
+  const commitInlineEdit = async () => {
+    if (!inlineEdit) return
+    const { worktreeId, value } = inlineEdit
+    const trimmed = value.trim()
+    inlineEdit = null
+    if (trimmed) {
+      await Effect.runPromise(
+        worktreeSvc.rename(worktreeId, trimmed).pipe(Effect.catchAll(() => Effect.void))
+      )
+      await refresh()
+    }
+    markDirty()
+  }
+
+  const cancelInlineEdit = () => {
+    inlineEdit = null
+    markDirty()
+  }
+
+  const handleMouse = (button: number, x: number, y: number, press: boolean): "handled" | "forward" | "drop" => {
+    // Wheel events: always handled locally to scroll the terminal panel
+    if (button === 64 || button === 65) {
+      if (activeHandle() && x > SIDEBAR_WIDTH + 1) {
+        const cur = currentScrollOffset()
+        setScrollOffset(button === 64 ? cur + 3 : cur - 3)
+        return "handled"
+      }
+      return "drop"
+    }
+    // Sidebar clicks: single = select+open, double = rename.
+    // Each worktree now spans two rows (primary + project line).
+    if (x <= SIDEBAR_WIDTH && press && button === 0) {
+      const i = Math.floor((y - 3) / 2)
+      if (i < 0 || i >= worktrees.length) return "handled"
+
+      const now = Date.now()
+      const isDouble = lastSidebarClick && lastSidebarClick.y === y && now - lastSidebarClick.time < 400
+      lastSidebarClick = { y, time: now }
+
+      const wt = worktrees[i]!
+      if (isDouble) {
+        startInlineEdit(wt.id)
+      } else {
+        selectedIndex = i
+        activeWorktreeId = wt.id
+        spawnPty(wt.id).then(() => { focus = "terminal"; markDirty() })
+      }
+      return "handled"
+    }
+    // Terminal area: forward to PTY with adjusted coords
+    if (x > SIDEBAR_WIDTH + 1 && activeHandle()) {
+      return "forward"
+    }
+    return "drop"
+  }
+
+  const onInput = (rawData: Buffer) => {
+    let str = rawData.toString("utf-8")
+    markDirty()
+
+    // Strip bracketed-paste markers. Terminals wrap pastes in
+    // \x1b[200~...\x1b[201~ so the app can distinguish typing from pasting.
+    // We just unwrap and treat the content as ordinary input.
+    if (str.includes("\x1b[200~") || str.includes("\x1b[201~")) {
+      str = str.replace(/\x1b\[2(00|01)~/g, "")
+      if (str.length === 0) return
+    }
+
+    if (str === "\x03") { quit(); return }
+
+    // F1..F9: jump directly to that worktree from any focus.
+    if (FKEY_TO_NUM[str] !== undefined) {
+      jumpToWorktree(FKEY_TO_NUM[str]! - 1)
+      return
+    }
+
+    // Mouse events: parse and dispatch
+    const m = str.match(MOUSE_RE)
+    if (m) {
+      const button = parseInt(m[1]!, 10)
+      const x = parseInt(m[2]!, 10)
+      const y = parseInt(m[3]!, 10)
+      const press = m[4] === "M"
+      const decision = handleMouse(button, x, y, press)
+      if (decision === "forward") {
+        const h = activeHandle()
+        if (h) {
+          const newX = x - (SIDEBAR_WIDTH + 1)
+          h.write(`\x1b[<${button};${newX};${y}${m[4]}`)
+        }
+      }
+      return
+    }
+
+    if (inlineEdit) { onInlineEditInput(str); return }
+    if (modal.type !== "none") { onModalInput(str); return }
+    if (focus === "terminal") { onTerminalInput(str); return }
+    onSidebarInput(str)
+  }
+
+  const onInlineEditInput = (str: string) => {
+    if (!inlineEdit) return
+    if (str === "\r") { commitInlineEdit(); return }
+    if (str === "\x1b") { cancelInlineEdit(); return }
+    // Cmd+Backspace on macOS → terminals send Ctrl+U (\x15) = kill line
+    if (str === "\x15") {
+      inlineEdit = { ...inlineEdit, value: "" }
+      return
+    }
+    // Option+Backspace on macOS → terminals send Ctrl+W (\x17) = kill last word
+    if (str === "\x17") {
+      const trimmed = inlineEdit.value.replace(/\S+\s*$/, "").replace(/\s+$/, "")
+      inlineEdit = { ...inlineEdit, value: trimmed }
+      return
+    }
+    if (str === "\x7f") {
+      inlineEdit = { ...inlineEdit, value: inlineEdit.value.slice(0, -1) }
+      return
+    }
+    if (str.startsWith("\x1b") && str !== "\x1b") {
+      // Unhandled escape sequence — ignore.
+      return
+    }
+    // Accept typed chars AND multi-char pastes; strip control bytes.
+    const text = filterPrintable(str)
+    if (text.length > 0) {
+      inlineEdit = { ...inlineEdit, value: inlineEdit.value + text }
+    }
+  }
+
+  const jumpToWorktree = (index: number) => {
+    if (index < 0 || index >= worktrees.length) return
+    const wt = worktrees[index]!
+    selectedIndex = index
+    activeWorktreeId = wt.id
+    setSetting(SETTING_LAST_ACTIVE, wt.id)
+    spawnPty(wt.id).then(() => { focus = "terminal"; markDirty() })
+  }
+
+  // F1..F9 send escape sequences that work in any modern terminal and don't
+  // conflict with macOS Alt-based desktop shortcuts.
+  const FKEY_TO_NUM: Record<string, number> = {
+    "\x1bOP": 1, "\x1bOQ": 2, "\x1bOR": 3, "\x1bOS": 4,
+    "\x1b[15~": 5, "\x1b[17~": 6, "\x1b[18~": 7, "\x1b[19~": 8, "\x1b[20~": 9,
+  }
+
+  const onSidebarInput = (str: string) => {
+    if (str.length > 1 && !str.startsWith("\x1b")) return
+
+    // Digit 1-9: jump directly to that worktree
+    if (str.length === 1 && str >= "1" && str <= "9") {
+      jumpToWorktree(parseInt(str, 10) - 1)
+      return
+    }
+
+    switch (str) {
+      case "q": quit(); break
+      case "j": case "\x1b[B":
+        selectedIndex = Math.min(worktrees.length - 1, selectedIndex + 1); break
+      case "k": case "\x1b[A":
+        selectedIndex = Math.max(0, selectedIndex - 1); break
+      case "\r":
+        if (worktrees.length > 0) {
+          const wt = worktrees[selectedIndex]
+          if (wt) {
+            activeWorktreeId = wt.id
+            setSetting(SETTING_LAST_ACTIVE, wt.id)
+            spawnPty(wt.id).then(() => { focus = "terminal" })
+          }
+        } else {
+          handleNew()
+        }
+        break
+      case "n": handleNew(); break
+      case "d": handleArchive(); break
+      case "o": handleEditorPicker(); break
+      case "r": {
+        const wt = worktrees[selectedIndex]
+        if (wt) startInlineEdit(wt.id)
+        break
+      }
+      case "s": handleProjectSettings(); break
+      case "S": handleGlobalSettings(); break
+      case "y": {
+        const wt = worktrees[selectedIndex]
+        if (wt) {
+          copyToClipboard(wt.path)
+          showToast(`Copied path: ${wt.path}`)
+        }
+        break
+      }
+    }
+  }
+
+  const onTerminalInput = (str: string) => {
+    if (str === "\x02") { focus = "sidebar"; return }
+    if (str === "\x0f") { handleEditorPicker(); return }
+    // Shift+Up / Shift+Down = scroll terminal panel
+    if (str === "\x1b[1;2A") { setScrollOffset(currentScrollOffset() + 1); return }
+    if (str === "\x1b[1;2B") { setScrollOffset(currentScrollOffset() - 1); return }
+    // Shift+PageUp / Shift+PageDown = scroll by page
+    if (str === "\x1b[5;2~") { setScrollOffset(currentScrollOffset() + termRows()); return }
+    if (str === "\x1b[6;2~") { setScrollOffset(currentScrollOffset() - termRows()); return }
+    // Any other key resets scroll to follow-tail
+    if (currentScrollOffset() > 0 && str.length === 1 && str >= " ") {
+      setScrollOffset(0)
+    }
+    const h = activeHandle()
+    if (h) h.write(str)
+  }
+
+  const onModalInput = (str: string) => {
+    if (str === "\x1b") {
+      modal = { type: "none" }
+      focus = activeHandle() ? "terminal" : "sidebar"
+      return
+    }
+
+    // Error modal: any key dismisses
+    if (modal.type === "error") {
+      modal = { type: "none" }
+      focus = activeHandle() ? "terminal" : "sidebar"
+      return
+    }
+
+    switch (modal.type) {
+      case "input":
+        if (str === "\r") {
+          modal.onSubmit(modal.value.trim())
+        } else if (str === "\x7f") {
+          modal = { ...modal, value: modal.value.slice(0, -1) }
+        } else if (str === "\x15") {
+          // Cmd+Backspace: clear entire input
+          modal = { ...modal, value: "" }
+        } else if (str === "\x17") {
+          // Opt+Backspace: delete last word (or last path segment)
+          const trimmed = modal.value.replace(/[^\s/]+[\s/]*$/, "").replace(/[\s/]+$/, "")
+          modal = { ...modal, value: trimmed }
+        } else if (str === "\t") {
+          // Tab complete (filesystem paths)
+          modal = { ...modal, value: completePath(modal.value) }
+        } else if (str.startsWith("\x1b")) {
+          // Unhandled escape sequence (arrows, fn keys, etc.) — ignore so
+          // we don't append "[A" etc. to the value.
+        } else {
+          // Accept typed chars AND multi-char pastes; strip control bytes.
+          const text = filterPrintable(str)
+          if (text.length > 0) {
+            modal = { ...modal, value: modal.value + text }
+          }
+        }
+        break
+
+      case "textarea":
+        if (str === "\x04") {
+          modal.onSubmit(modal.value)
+        } else if (str === "\r" && str.length === 1) {
+          modal = { ...modal, value: modal.value + "\n" }
+        } else if (str === "\x7f") {
+          modal = { ...modal, value: modal.value.slice(0, -1) }
+        } else if (str === "\x15") {
+          const idx = modal.value.lastIndexOf("\n")
+          modal = { ...modal, value: idx >= 0 ? modal.value.slice(0, idx + 1) : "" }
+        } else if (str === "\x17") {
+          const lastNl = modal.value.lastIndexOf("\n")
+          const head = modal.value.slice(0, lastNl + 1)
+          const tail = modal.value.slice(lastNl + 1)
+          const trimmedTail = tail.replace(/\S+\s*$/, "").replace(/\s+$/, "")
+          modal = { ...modal, value: head + trimmedTail }
+        } else if (str.startsWith("\x1b") && str !== "\x1b") {
+          // Unhandled escape sequence — ignore.
+        } else {
+          // Accept typed chars AND pastes. Preserve \n, normalize \r\n→\n,
+          // strip other control bytes (including bare \r which would submit).
+          const text = str
+            .replace(/\r\n?/g, "\n")
+            .replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "")
+          if (text.length > 0) {
+            modal = { ...modal, value: modal.value + text }
+          }
+        }
+        break
+
+      case "select":
+        if (str === "\r") {
+          modal.onSelect(modal.options[modal.selectedIndex]!)
+        } else if (str === "j" || str === "\x1b[B") {
+          modal = { ...modal, selectedIndex: Math.min(modal.options.length - 1, modal.selectedIndex + 1) }
+        } else if (str === "k" || str === "\x1b[A") {
+          modal = { ...modal, selectedIndex: Math.max(0, modal.selectedIndex - 1) }
+        }
+        break
+
+      case "confirm":
+        if (str === "y" || str === "Y") modal.onConfirm()
+        else if (str === "n" || str === "N") { modal = { type: "none" }; focus = "sidebar" }
+        break
+
+      case "editor-picker":
+        if (str === "\r") {
+          const editor = availableEditors[modal.selectedIndex]!
+          const wtId = modal.worktreeId
+          modal = { type: "none" }
+          focus = activeHandle() ? "terminal" : "sidebar"
+          const wt = worktrees.find(w => w.id === wtId)
+          if (wt) openEditor(editor, wt.path)
+        } else if (str === "j" || str === "\x1b[B") {
+          modal = { ...modal, selectedIndex: Math.min(availableEditors.length - 1, modal.selectedIndex + 1) }
+        } else if (str === "k" || str === "\x1b[A") {
+          modal = { ...modal, selectedIndex: Math.max(0, modal.selectedIndex - 1) }
+        }
+        break
+    }
+  }
+
+  // --- Initialize ---
+
+  await refresh()
+  availableEditors = detectEditors()
+
+  process.stdout.write(ALT_SCREEN_ON + MOUSE_ON + BPASTE_ON)
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true)
+  }
+  process.stdin.resume()
+  process.stdin.on("data", onInput)
+
+  process.stdout.on("resize", () => {
+    const h = activeHandle()
+    if (h) h.resize(termCols(), termRows())
+    markDirty()
+  })
+
+  if (projects.length === 0) {
+    startOnboarding()
+  } else if (worktrees.length > 0) {
+    // Restore the previously-active worktree if it still exists. Otherwise
+    // pick the most-recently-updated worktree.
+    const lastId = getSetting(SETTING_LAST_ACTIVE)
+    const restored = lastId && worktrees.find(w => w.id === lastId)
+    if (restored) {
+      activeWorktreeId = restored.id
+      selectedIndex = worktrees.findIndex(w => w.id === restored.id)
+      // Auto-spawn its PTY so the user resumes where they left off
+      spawnPty(restored.id).then(() => { focus = "terminal"; markDirty() })
+    } else {
+      activeWorktreeId = worktrees[0]!.id
+    }
+  }
+
+  const paintLoop = setInterval(paint, 33)
+  paint()
+
+  process.on("SIGINT", quit)
+  process.on("SIGTERM", quit)
+}
