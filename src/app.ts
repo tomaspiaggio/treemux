@@ -107,17 +107,24 @@ async function bootstrap(
   let activeWorktreeId: string | null = null
   let modal: ModalState = { type: "none" }
   let projects: Project[] = []
+  let activeWorktrees: WorktreeEntry[] = []
+  let archivedWorktrees: WorktreeEntry[] = []
   let worktrees: WorktreeEntry[] = []
+  let viewMode: "active" | "archived" = "active"
   let availableEditors: EditorOption[] = []
   let running = true
   let dirty = true
   let inlineEdit: { worktreeId: string; value: string } | null = null
   let lastSidebarClick: { y: number; time: number } | null = null
+  let sidebarHidden = false
   const scrollOffsets = new Map<string, number>()
   // PR detection (via `gh pr list`). null = checked, no PR; undefined = not checked yet.
   const prNumbers = new Map<string, number | null>()
   const prFetchedAt = new Map<string, number>()
-  const PR_CACHE_MS = 5 * 60 * 1000
+  // Found PRs are stable, but null-results (no PR yet) need to recheck often
+  // so newly created PRs show up quickly.
+  const PR_CACHE_FOUND_MS = 5 * 60 * 1000
+  const PR_CACHE_NULL_MS = 30 * 1000
   let ghAvailable: boolean | null = null
   // Setup script status per worktree. "running" while scripts execute,
   // dropped from the map when finished.
@@ -155,12 +162,19 @@ async function bootstrap(
 
   const cols = () => process.stdout.columns || 80
   const rows = () => process.stdout.rows || 24
-  const termCols = () => cols() - SIDEBAR_WIDTH - 1
+  const termCols = () => sidebarHidden ? cols() : cols() - SIDEBAR_WIDTH - 1
   const termRows = () => rows() - 2
+
+  const applyView = () => {
+    worktrees = viewMode === "active" ? activeWorktrees : archivedWorktrees
+    selectedIndex = Math.min(selectedIndex, Math.max(0, worktrees.length - 1))
+  }
 
   const refresh = async () => {
     projects = [...await Effect.runPromise(projectSvc.list())]
-    worktrees = [...await Effect.runPromise(worktreeSvc.list())]
+    activeWorktrees = [...await Effect.runPromise(worktreeSvc.list())]
+    archivedWorktrees = [...await Effect.runPromise(worktreeSvc.listArchived())]
+    applyView()
     // Kick off PR checks in the background; don't block UI.
     fetchAllPRs()
   }
@@ -180,7 +194,12 @@ async function bootstrap(
     if (!(await checkGhAvailable())) return
     const now = Date.now()
     const last = prFetchedAt.get(wt.id) ?? 0
-    if (now - last < PR_CACHE_MS) return
+    const cached = prNumbers.get(wt.id)
+    const ttl =
+      cached === undefined ? 0 :
+      cached === null ? PR_CACHE_NULL_MS :
+      PR_CACHE_FOUND_MS
+    if (now - last < ttl) return
     prFetchedAt.set(wt.id, now)
     try {
       const proc = Bun.spawn(
@@ -272,6 +291,20 @@ async function bootstrap(
     scrollOffsets.set(activeWorktreeId, clamped)
   }
 
+  let mouseModeEnabled = false
+  const syncMouseMode = () => {
+    // Enable mouse reporting only when NOT in terminal focus, so the
+    // embedded terminal's native selection / Cmd+Click on URLs work.
+    const shouldEnable = focus !== "terminal" || modal.type !== "none"
+    if (shouldEnable && !mouseModeEnabled) {
+      process.stdout.write(MOUSE_ON)
+      mouseModeEnabled = true
+    } else if (!shouldEnable && mouseModeEnabled) {
+      process.stdout.write(MOUSE_OFF)
+      mouseModeEnabled = false
+    }
+  }
+
   const paint = () => {
     if (!running) return
     const h = activeHandle()
@@ -280,6 +313,8 @@ async function bootstrap(
     if (setupRunning.size > 0) dirty = true
     if (!dirty) return
     dirty = false
+
+    syncMouseMode()
 
     const frame = paintFrame({
       worktrees,
@@ -297,6 +332,9 @@ async function bootstrap(
       prNumbers,
       setupRunning,
       toast: toastMessage && Date.now() < toastUntil ? toastMessage : null,
+      sidebarHidden,
+      viewMode,
+      archivedCount: archivedWorktrees.length,
     })
     process.stdout.write(frame)
   }
@@ -307,7 +345,7 @@ async function bootstrap(
     for (const id of ptySvc.listActive()) {
       Effect.runSync(ptySvc.kill(id))
     }
-    process.stdout.write(BPASTE_OFF + MOUSE_OFF + ALT_SCREEN_OFF + SHOW_CURSOR + SGR_RESET)
+    process.stdout.write(BPASTE_OFF + (mouseModeEnabled ? MOUSE_OFF : "") + ALT_SCREEN_OFF + SHOW_CURSOR + SGR_RESET)
     if (process.stdin.isTTY) process.stdin.setRawMode(false)
     process.stdin.pause()
   }
@@ -333,13 +371,11 @@ async function bootstrap(
     if (!newId) return
 
     await refresh()
-    activeWorktreeId = newId
-    setSetting(SETTING_LAST_ACTIVE, newId)
     selectedIndex = worktrees.findIndex(w => w.id === newId)
     if (selectedIndex < 0) selectedIndex = 0
 
-    try { await spawnPty(newId) } catch {}
-    focus = activeHandle() ? "terminal" : "sidebar"
+    // Open the newly-created worktree (hides sidebar, focuses terminal).
+    try { await openWorktree(newId) } catch {}
 
     if (project.setupScript.length > 0) {
       const wtId = newId
@@ -635,7 +671,7 @@ async function bootstrap(
   const handleMouse = (button: number, x: number, y: number, press: boolean): "handled" | "forward" | "drop" => {
     // Wheel events: always handled locally to scroll the terminal panel
     if (button === 64 || button === 65) {
-      if (activeHandle() && x > SIDEBAR_WIDTH + 1) {
+      if (activeHandle() && (sidebarHidden || x > SIDEBAR_WIDTH + 1)) {
         const cur = currentScrollOffset()
         setScrollOffset(button === 64 ? cur + 3 : cur - 3)
         return "handled"
@@ -644,7 +680,7 @@ async function bootstrap(
     }
     // Sidebar clicks: single = select+open, double = rename.
     // Each worktree now spans two rows (primary + project line).
-    if (x <= SIDEBAR_WIDTH && press && button === 0) {
+    if (!sidebarHidden && x <= SIDEBAR_WIDTH && press && button === 0) {
       const i = Math.floor((y - 3) / 2)
       if (i < 0 || i >= worktrees.length) return "handled"
 
@@ -657,13 +693,12 @@ async function bootstrap(
         startInlineEdit(wt.id)
       } else {
         selectedIndex = i
-        activeWorktreeId = wt.id
-        spawnPty(wt.id).then(() => { focus = "terminal"; markDirty() })
+        openWorktree(wt.id)
       }
       return "handled"
     }
     // Terminal area: forward to PTY with adjusted coords
-    if (x > SIDEBAR_WIDTH + 1 && activeHandle()) {
+    if ((sidebarHidden || x > SIDEBAR_WIDTH + 1) && activeHandle()) {
       return "forward"
     }
     return "drop"
@@ -700,7 +735,7 @@ async function bootstrap(
       if (decision === "forward") {
         const h = activeHandle()
         if (h) {
-          const newX = x - (SIDEBAR_WIDTH + 1)
+          const newX = sidebarHidden ? x : x - (SIDEBAR_WIDTH + 1)
           h.write(`\x1b[<${button};${newX};${y}${m[4]}`)
         }
       }
@@ -743,13 +778,26 @@ async function bootstrap(
     }
   }
 
+  // Centralized "open this worktree" — focuses terminal, hides sidebar,
+  // resizes the PTY to the new (wider) viewport.
+  const openWorktree = async (wtId: string) => {
+    activeWorktreeId = wtId
+    setSetting(SETTING_LAST_ACTIVE, wtId)
+    if (!sidebarHidden) {
+      sidebarHidden = true
+    }
+    await spawnPty(wtId)
+    const h = activeHandle()
+    if (h) h.resize(termCols(), termRows())
+    focus = "terminal"
+    markDirty()
+  }
+
   const jumpToWorktree = (index: number) => {
     if (index < 0 || index >= worktrees.length) return
     const wt = worktrees[index]!
     selectedIndex = index
-    activeWorktreeId = wt.id
-    setSetting(SETTING_LAST_ACTIVE, wt.id)
-    spawnPty(wt.id).then(() => { focus = "terminal"; markDirty() })
+    openWorktree(wt.id)
   }
 
   // F1..F9 send escape sequences that work in any modern terminal and don't
@@ -759,15 +807,118 @@ async function bootstrap(
     "\x1b[15~": 5, "\x1b[17~": 6, "\x1b[18~": 7, "\x1b[19~": 8, "\x1b[20~": 9,
   }
 
+  const restoreWorktree = (worktreeId: string) => {
+    Effect.runPromise(
+      worktreeSvc.restore(worktreeId).pipe(Effect.catchAll(() => Effect.void))
+    ).then(() => refresh()).then(() => {
+      showToast("Restored. Switch back with 'a'.")
+      markDirty()
+    })
+  }
+
+  const handlePermanentDelete = () => {
+    const wt = worktrees[selectedIndex]
+    if (!wt) return
+    const wtId = wt.id
+    const displayName = wt.displayName
+    focus = "modal"
+    modal = {
+      type: "confirm",
+      title: "Delete permanently",
+      message: `Permanently delete "${displayName}"? This removes the git worktree and cannot be undone. (y/n)`,
+      onConfirm: () => {
+        // Capture the entry + its position so we can restore on failure.
+        const originalActiveIdx = activeWorktrees.findIndex(w => w.id === wtId)
+        const originalArchivedIdx = archivedWorktrees.findIndex(w => w.id === wtId)
+        const original = wt
+
+        // OPTIMISTIC UI: remove from in-memory lists right now.
+        activeWorktrees = activeWorktrees.filter(w => w.id !== wtId)
+        archivedWorktrees = archivedWorktrees.filter(w => w.id !== wtId)
+        applyView()
+
+        // Kill any PTY (no-op if not running) so git worktree remove won't
+        // get blocked by an open process holding files in the worktree.
+        Effect.runSync(ptySvc.kill(wtId))
+
+        modal = { type: "none" }
+        focus = "sidebar"
+        showToast(`Deleted ${displayName}`)
+        markDirty()
+
+        // Actual deletion in the background. If it fails, restore the entry
+        // to its original position and surface the error.
+        Effect.runPromise(worktreeSvc.remove(wtId))
+          .catch((err) => {
+            if (originalActiveIdx >= 0) {
+              const next = [...activeWorktrees]
+              next.splice(originalActiveIdx, 0, original)
+              activeWorktrees = next
+            }
+            if (originalArchivedIdx >= 0) {
+              const next = [...archivedWorktrees]
+              next.splice(originalArchivedIdx, 0, original)
+              archivedWorktrees = next
+            }
+            applyView()
+            markDirty()
+            const msg = err?.message ?? String(err)
+            showErrorModal(`Delete failed`, `Could not delete "${displayName}":\n\n${msg}`)
+          })
+      },
+    }
+  }
+
+  const toggleView = () => {
+    viewMode = viewMode === "active" ? "archived" : "active"
+    selectedIndex = 0
+    applyView()
+    markDirty()
+  }
+
   const onSidebarInput = (str: string) => {
     if (str.length > 1 && !str.startsWith("\x1b")) return
 
-    // Digit 1-9: jump directly to that worktree
-    if (str.length === 1 && str >= "1" && str <= "9") {
+    // Ctrl+B from sidebar: hide sidebar and jump to terminal (full-screen).
+    if (str === "\x02") {
+      toggleSidebar()
+      if (activeHandle()) focus = "terminal"
+      return
+    }
+
+    // Digit 1-9: jump directly to that worktree (only in active view).
+    if (viewMode === "active" && str.length === 1 && str >= "1" && str <= "9") {
       jumpToWorktree(parseInt(str, 10) - 1)
       return
     }
 
+    // View toggle: 'a' from active → archived; 'a' or Esc-like behavior in archived → active.
+    if (str === "a") { toggleView(); return }
+
+    // Archived-view-only actions
+    if (viewMode === "archived") {
+      // Esc exits the archived view back to active.
+      if (str === "\x1b") { toggleView(); return }
+      switch (str) {
+        case "q": quit(); break
+        case "j": case "\x1b[B":
+          selectedIndex = Math.min(worktrees.length - 1, selectedIndex + 1); break
+        case "k": case "\x1b[A":
+          selectedIndex = Math.max(0, selectedIndex - 1); break
+        case "u": case "r": {
+          // u = un-archive, r = restore. Both feel natural here.
+          const wt = worktrees[selectedIndex]
+          if (wt) restoreWorktree(wt.id)
+          break
+        }
+        case "D":
+          handlePermanentDelete()
+          break
+      }
+      return
+    }
+
+    // Active view actions
     switch (str) {
       case "q": quit(); break
       case "j": case "\x1b[B":
@@ -777,11 +928,7 @@ async function bootstrap(
       case "\r":
         if (worktrees.length > 0) {
           const wt = worktrees[selectedIndex]
-          if (wt) {
-            activeWorktreeId = wt.id
-            setSetting(SETTING_LAST_ACTIVE, wt.id)
-            spawnPty(wt.id).then(() => { focus = "terminal" })
-          }
+          if (wt) openWorktree(wt.id)
         } else {
           handleNew()
         }
@@ -807,8 +954,21 @@ async function bootstrap(
     }
   }
 
+  const toggleSidebar = () => {
+    sidebarHidden = !sidebarHidden
+    const h = activeHandle()
+    if (h) h.resize(termCols(), termRows())
+    markDirty()
+  }
+
   const onTerminalInput = (str: string) => {
-    if (str === "\x02") { focus = "sidebar"; return }
+    if (str === "\x02") {
+      // Ctrl+B from terminal: if sidebar is hidden, show it (and focus it);
+      // otherwise just move focus to the visible sidebar.
+      if (sidebarHidden) toggleSidebar()
+      focus = "sidebar"
+      return
+    }
     if (str === "\x0f") { handleEditorPicker(); return }
     // Shift+Up / Shift+Down = scroll terminal panel
     if (str === "\x1b[1;2A") { setScrollOffset(currentScrollOffset() + 1); return }
@@ -933,7 +1093,10 @@ async function bootstrap(
   await refresh()
   availableEditors = detectEditors()
 
-  process.stdout.write(ALT_SCREEN_ON + MOUSE_ON + BPASTE_ON)
+  // Mouse reporting is enabled lazily based on focus — see syncMouseMode.
+  // We never want it on while the user is interacting with the embedded
+  // terminal, because it hijacks drag-to-select and Cmd+Click on URLs.
+  process.stdout.write(ALT_SCREEN_ON + BPASTE_ON)
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true)
   }
@@ -954,10 +1117,8 @@ async function bootstrap(
     const lastId = getSetting(SETTING_LAST_ACTIVE)
     const restored = lastId && worktrees.find(w => w.id === lastId)
     if (restored) {
-      activeWorktreeId = restored.id
       selectedIndex = worktrees.findIndex(w => w.id === restored.id)
-      // Auto-spawn its PTY so the user resumes where they left off
-      spawnPty(restored.id).then(() => { focus = "terminal"; markDirty() })
+      openWorktree(restored.id)
     } else {
       activeWorktreeId = worktrees[0]!.id
     }
@@ -965,6 +1126,10 @@ async function bootstrap(
 
   const paintLoop = setInterval(paint, 33)
   paint()
+
+  // Background poll: re-fetch PR info every 30s so newly opened PRs show up
+  // without needing a manual refresh.
+  setInterval(() => { fetchAllPRs() }, 30 * 1000)
 
   process.on("SIGINT", quit)
   process.on("SIGTERM", quit)

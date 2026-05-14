@@ -1,4 +1,5 @@
 import { Context, Effect, Layer } from "effect"
+import { rm } from "node:fs/promises"
 import { GitError } from "../models/Errors.js"
 
 const runGit = (args: string[], cwd: string): Effect.Effect<string, GitError> =>
@@ -57,8 +58,29 @@ export const GitServiceLive = Layer.succeed(GitService, {
       Effect.asVoid
     ),
 
+  // Robust removal:
+  //   1. rm -rf the directory directly (fast, can't hang waiting on git).
+  //   2. Run `git worktree prune` with a 5s timeout to clean stale records.
+  // We intentionally do NOT call `git worktree remove --force` because that
+  // can hang indefinitely (lock files, dirty working trees, network mounts),
+  // which previously caused the whole delete pipeline to stall and the DB
+  // row to never get removed.
   removeWorktree: (repoPath, worktreePath) =>
-    runGit(["worktree", "remove", "--force", worktreePath], repoPath).pipe(Effect.asVoid),
+    Effect.gen(function* () {
+      yield* Effect.tryPromise({
+        try: () => rm(worktreePath, { recursive: true, force: true }),
+        catch: (e) => new GitError({
+          message: `rm -rf failed`,
+          command: `rm -rf ${worktreePath}`,
+          stderr: String(e),
+        }),
+      }).pipe(Effect.catchAll(() => Effect.void))
+      yield* runGit(["worktree", "prune"], repoPath).pipe(
+        Effect.asVoid,
+        Effect.timeout("5 seconds"),
+        Effect.catchAll(() => Effect.void),
+      )
+    }),
 
   isBranchMerged: (repoPath, branch, into = "main") =>
     runGit(["branch", "--merged", into], repoPath).pipe(

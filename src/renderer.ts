@@ -75,35 +75,40 @@ export interface FrameOpts {
   prNumbers: ReadonlyMap<string, number | null>
   setupRunning: ReadonlySet<string>
   toast: string | null
+  sidebarHidden: boolean
+  viewMode: "active" | "archived"
+  archivedCount: number
 }
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 const spinner = (): string => SPINNER_FRAMES[Math.floor(Date.now() / 80) % SPINNER_FRAMES.length]!
 
 export function paintFrame(opts: FrameOpts): string {
-  const { worktrees, projects, selectedIndex, activeWorktreeId, focus, modal, handle, availableEditors, cols, rows, scrollOffset, inlineEdit, prNumbers, setupRunning, toast } = opts
+  const { worktrees, projects, selectedIndex, activeWorktreeId, focus, modal, handle, availableEditors, cols, rows, scrollOffset, inlineEdit, prNumbers, setupRunning, toast, sidebarHidden, viewMode, archivedCount } = opts
   const contentHeight = rows - 2
-  const termCols = cols - SIDEBAR_WIDTH - 1
+  const termStartCol = sidebarHidden ? 1 : SIDEBAR_WIDTH + 2
+  const termCols = sidebarHidden ? cols : cols - SIDEBAR_WIDTH - 1
 
   let out = HIDE_CURSOR
 
-  out += paintSidebar(worktrees, projects, selectedIndex, activeWorktreeId, contentHeight, focus === "sidebar", inlineEdit, prNumbers, setupRunning)
-
-  for (let r = 1; r <= contentHeight; r++) {
-    out += moveTo(r, SIDEBAR_WIDTH + 1) + BORDER_FG + "│" + SGR_RESET
+  if (!sidebarHidden) {
+    out += paintSidebar(worktrees, projects, selectedIndex, activeWorktreeId, contentHeight, focus === "sidebar", inlineEdit, prNumbers, setupRunning, viewMode, archivedCount)
+    for (let r = 1; r <= contentHeight; r++) {
+      out += moveTo(r, SIDEBAR_WIDTH + 1) + BORDER_FG + "│" + SGR_RESET
+    }
   }
 
   if (handle) {
-    out += paintTerminal(handle, SIDEBAR_WIDTH + 2, 1, termCols, contentHeight, scrollOffset)
+    out += paintTerminal(handle, termStartCol, 1, termCols, contentHeight, scrollOffset)
   } else {
     const wt = worktrees[selectedIndex]
-    out += paintPlaceholder(wt, SIDEBAR_WIDTH + 2, 1, termCols, contentHeight, projects.length === 0)
+    out += paintPlaceholder(wt, termStartCol, 1, termCols, contentHeight, projects.length === 0)
   }
 
   const selWt = worktrees[selectedIndex]
   const selProj = selWt ? projects.find(p => p.id === selWt.projectId) : undefined
   out += paintDetailBar(selWt, selProj, rows - 1, cols, scrollOffset, toast)
-  out += paintStatusBar(focus, rows, cols)
+  out += paintStatusBar(focus, rows, cols, viewMode)
 
   if (modal.type !== "none") {
     out += paintModal(modal, availableEditors, cols, rows)
@@ -122,7 +127,7 @@ export function paintFrame(opts: FrameOpts): string {
     const cy = handle.terminal.buffer.active.cursorY
     const cx = handle.terminal.buffer.active.cursorX
     const sr = 1 + cy
-    const sc = SIDEBAR_WIDTH + 2 + cx
+    const sc = termStartCol + cx
     if (sr <= contentHeight && sc <= cols) {
       out += moveTo(sr, sc) + SHOW_CURSOR
     }
@@ -146,14 +151,24 @@ function paintSidebar(
   inlineEdit: InlineEdit | null,
   prNumbers: ReadonlyMap<string, number | null>,
   setupRunning: ReadonlySet<string>,
+  viewMode: "active" | "archived",
+  archivedCount: number,
 ): string {
   let out = ""
 
-  const brand = " litetree"
-  const handle = " · @tomaspiaggio"
-  out += moveTo(1, 1) + SIDEBAR_BG + HEADER_FG + SGR_BOLD + brand + SGR_RESET
-  out += SIDEBAR_BG + DIM_FG + SGR_DIM + handle + SGR_RESET
-  out += SIDEBAR_BG + " ".repeat(Math.max(0, SIDEBAR_WIDTH - brand.length - handle.length)) + SGR_RESET
+  if (viewMode === "archived") {
+    const head = " archived"
+    const hint = " · 'a' back"
+    out += moveTo(1, 1) + SIDEBAR_BG + ACCENT + SGR_BOLD + head + SGR_RESET
+    out += SIDEBAR_BG + DIM_FG + SGR_DIM + hint + SGR_RESET
+    out += SIDEBAR_BG + " ".repeat(Math.max(0, SIDEBAR_WIDTH - head.length - hint.length)) + SGR_RESET
+  } else {
+    const brand = " litetree"
+    const handle = " · @tomaspiaggio"
+    out += moveTo(1, 1) + SIDEBAR_BG + HEADER_FG + SGR_BOLD + brand + SGR_RESET
+    out += SIDEBAR_BG + DIM_FG + SGR_DIM + handle + SGR_RESET
+    out += SIDEBAR_BG + " ".repeat(Math.max(0, SIDEBAR_WIDTH - brand.length - handle.length)) + SGR_RESET
+  }
 
   out += moveTo(2, 1) + SIDEBAR_BG + BORDER_FG + SGR_DIM + "─".repeat(SIDEBAR_WIDTH) + SGR_RESET
 
@@ -217,12 +232,24 @@ function paintSidebar(
           out += moveTo(r, 1) + SIDEBAR_BG + DIM_FG + SGR_DIM + indent + shown + " ".repeat(pad) + SGR_RESET
         }
       }
-    } else if (i === worktrees.length && isPrimary) {
+    } else if (i === worktrees.length && isPrimary && viewMode === "active") {
       const label = " [+ New]"
       out += moveTo(r, 1) + SIDEBAR_BG + DIM_FG + label + " ".repeat(Math.max(0, SIDEBAR_WIDTH - label.length)) + SGR_RESET
     } else {
       out += moveTo(r, 1) + SIDEBAR_BG + " ".repeat(SIDEBAR_WIDTH) + SGR_RESET
     }
+  }
+
+  // Bottom-of-sidebar status: "Archived (N) — 'a'" in active view (only if any),
+  // or restore/delete legend in archived view.
+  if (viewMode === "active" && archivedCount > 0) {
+    const label = ` archived (${archivedCount}) · 'a'`
+    const r = height
+    out += moveTo(r, 1) + SIDEBAR_BG + DIM_FG + SGR_DIM + label + " ".repeat(Math.max(0, SIDEBAR_WIDTH - label.length)) + SGR_RESET
+  } else if (viewMode === "archived") {
+    const label = " u restore · D delete"
+    const r = height
+    out += moveTo(r, 1) + SIDEBAR_BG + DIM_FG + SGR_DIM + label + " ".repeat(Math.max(0, SIDEBAR_WIDTH - label.length)) + SGR_RESET
   }
 
   return out
@@ -423,15 +450,18 @@ function paintDetailBar(wt: WorktreeEntry | undefined, project: Project | undefi
   return out
 }
 
-function paintStatusBar(focus: string, row: number, _cols: number): string {
+function paintStatusBar(focus: string, row: number, _cols: number, viewMode: "active" | "archived"): string {
   let out = moveTo(row, 1) + BAR_BG + BAR_FG + " "
 
-  if (focus === "sidebar") {
+  if (focus === "sidebar" && viewMode === "archived") {
+    out += shortcut("a/Esc", "back to active") + shortcut("u", "restore")
+    out += shortcut("D", "delete forever") + shortcut("j/k", "navigate") + shortcut("q", "quit")
+  } else if (focus === "sidebar") {
     out += shortcut("Enter", "open") + shortcut("1-9", "jump") + shortcut("n", "new")
     out += shortcut("r", "rename") + shortcut("y", "yank path") + shortcut("d", "archive")
-    out += shortcut("s/S", "settings") + shortcut("q", "quit")
+    out += shortcut("a", "view archived") + shortcut("s/S", "settings") + shortcut("q", "quit")
   } else if (focus === "terminal") {
-    out += shortcut("Ctrl+B", "sidebar") + shortcut("F1-F9", "jump") + shortcut("Ctrl+O", "editor") + shortcut("Shift+↑↓", "scroll")
+    out += shortcut("Ctrl+B", "sidebar / fullscreen") + shortcut("F1-F9", "jump") + shortcut("Ctrl+O", "editor") + shortcut("Shift+↑↓", "scroll")
   }
 
   out += CLEAR_RIGHT + SGR_RESET
@@ -459,8 +489,35 @@ function paintModal(modal: ModalState, editors: EditorOption[], screenCols: numb
     const msgLines = modal.message.split("\n")
     const longest = Math.max(modal.title.length, ...msgLines.map(l => l.length), 40)
     mw = Math.min(screenCols - 4, Math.max(60, longest + 6))
+  } else if (modal.type === "confirm") {
+    const longest = Math.max(modal.title.length, modal.message.length, 40)
+    mw = Math.min(screenCols - 4, Math.max(60, longest + 6))
   } else {
     mw = Math.min(60, screenCols - 4)
+  }
+
+  // Word-wrap helper: wraps plain text to fit a given column width without
+  // breaking words (unless a word is itself longer than the width).
+  const wrapText = (text: string, width: number): string[] => {
+    if (width <= 0) return [text]
+    const out: string[] = []
+    for (const paragraph of text.split("\n")) {
+      const words = paragraph.split(/\s+/).filter(Boolean)
+      if (words.length === 0) { out.push(""); continue }
+      let line = ""
+      for (const w of words) {
+        if (line.length === 0) {
+          line = w.length > width ? w.slice(0, width) : w
+        } else if (line.length + 1 + w.length <= width) {
+          line += " " + w
+        } else {
+          out.push(line)
+          line = w.length > width ? w.slice(0, width) : w
+        }
+      }
+      if (line) out.push(line)
+    }
+    return out
   }
   const ml = Math.floor((screenCols - mw) / 2)
 
@@ -499,11 +556,13 @@ function paintModal(modal: ModalState, editors: EditorOption[], screenCols: numb
       break
     case "confirm":
       title = modal.title
-      lines = [modal.message]
+      // Wrap to fit the modal's inner content width (mw minus borders + padding).
+      lines = wrapText(modal.message, mw - 4)
       break
     case "error":
       title = modal.title
-      lines = modal.message.split("\n")
+      lines = []
+      for (const para of modal.message.split("\n")) lines.push(...wrapText(para, mw - 4))
       lines.push("")
       lines.push(DIM_FG + "Press any key to dismiss" + SGR_RESET + MODAL_BG)
       break

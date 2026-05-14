@@ -50,6 +50,15 @@ export class WorktreeService extends Context.Tag("WorktreeService")<
       WorktreeEntry,
       WorktreeDeleteError | ConfigReadError | ConfigWriteError
     >
+    readonly restore: (
+      worktreeId: string
+    ) => Effect.Effect<
+      WorktreeEntry,
+      WorktreeDeleteError | ConfigReadError | ConfigWriteError
+    >
+    readonly listArchived: (
+      projectId?: string
+    ) => Effect.Effect<readonly WorktreeEntry[], ConfigReadError>
     readonly list: (
       projectId?: string
     ) => Effect.Effect<readonly WorktreeEntry[], ConfigReadError>
@@ -151,6 +160,37 @@ export const WorktreeServiceLive = Layer.effect(
             worktrees: c.worktrees.map((w) => (w.id === worktreeId ? updated : w)),
           }) as typeof c)
           return updated
+        }),
+
+      restore: (worktreeId) =>
+        Effect.gen(function* () {
+          const cfg = yield* config.load
+          const wt = cfg.worktrees.find((w) => w.id === worktreeId)
+          if (!wt) {
+            return yield* new WorktreeDeleteError({
+              message: `Worktree not found: ${worktreeId}`,
+              worktreeId,
+            })
+          }
+          const updated = new WorktreeEntry({
+            ...wt,
+            status: "active",
+            updatedAt: new Date().toISOString(),
+          })
+          yield* config.update((c) => ({
+            ...c,
+            worktrees: c.worktrees.map((w) => (w.id === worktreeId ? updated : w)),
+          }) as typeof c)
+          return updated
+        }),
+
+      listArchived: (projectId) =>
+        Effect.gen(function* () {
+          const cfg = yield* config.load
+          const worktrees = projectId
+            ? cfg.worktrees.filter((w) => w.projectId === projectId)
+            : cfg.worktrees
+          return worktrees.filter((w) => w.status === "archived")
         }),
 
       rename: (worktreeId, displayName) =>
