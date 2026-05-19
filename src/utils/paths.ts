@@ -1,12 +1,12 @@
 import { join } from "node:path"
 import { homedir } from "node:os"
 
-const LITETREE_DIR = join(homedir(), ".litetree")
+const TREEMUX_DIR = join(homedir(), ".treemux")
 
 export const paths = {
-  root: LITETREE_DIR,
-  config: join(LITETREE_DIR, "config.json"),
-  worktrees: join(LITETREE_DIR, "worktrees"),
+  root: TREEMUX_DIR,
+  config: join(TREEMUX_DIR, "config.json"),
+  worktrees: join(TREEMUX_DIR, "worktrees"),
   worktree: (projectName: string, branch: string) =>
-    join(LITETREE_DIR, "worktrees", projectName, branch),
+    join(TREEMUX_DIR, "worktrees", projectName, branch),
 } as const

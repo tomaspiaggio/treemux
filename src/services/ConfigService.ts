@@ -1,16 +1,16 @@
 import { Context, Effect, Layer } from "effect"
-import { LitetreeConfig, Project, WorktreeEntry } from "../models/Config.js"
+import { TreemuxConfig, Project, WorktreeEntry } from "../models/Config.js"
 import { ConfigReadError, ConfigWriteError } from "../models/Errors.js"
 import { DatabaseService } from "./DatabaseService.js"
 
 export class ConfigService extends Context.Tag("ConfigService")<
   ConfigService,
   {
-    readonly load: Effect.Effect<LitetreeConfig, ConfigReadError>
-    readonly save: (config: LitetreeConfig) => Effect.Effect<void, ConfigWriteError>
+    readonly load: Effect.Effect<TreemuxConfig, ConfigReadError>
+    readonly save: (config: TreemuxConfig) => Effect.Effect<void, ConfigWriteError>
     readonly update: (
-      fn: (config: LitetreeConfig) => LitetreeConfig
-    ) => Effect.Effect<LitetreeConfig, ConfigReadError | ConfigWriteError>
+      fn: (config: TreemuxConfig) => TreemuxConfig
+    ) => Effect.Effect<TreemuxConfig, ConfigReadError | ConfigWriteError>
   }
 >() {}
 
@@ -67,18 +67,18 @@ export const ConfigServiceLive = Layer.effect(
   Effect.gen(function* () {
     const { db } = yield* DatabaseService
 
-    const loadConfig = (): LitetreeConfig => {
+    const loadConfig = (): TreemuxConfig => {
       const projects = db.query("SELECT * FROM projects ORDER BY name").all() as ProjectRow[]
       const worktrees = db
         .query("SELECT * FROM worktrees ORDER BY created_at DESC")
         .all() as WorktreeRow[]
-      return new LitetreeConfig({
+      return new TreemuxConfig({
         projects: projects.map(rowToProject),
         worktrees: worktrees.map(rowToWorktree),
       })
     }
 
-    const saveConfig = (config: LitetreeConfig) => {
+    const saveConfig = (config: TreemuxConfig) => {
       const tx = db.transaction(() => {
         db.exec("DELETE FROM worktrees")
         db.exec("DELETE FROM projects")
@@ -126,21 +126,21 @@ export const ConfigServiceLive = Layer.effect(
         catch: (e) =>
           new ConfigReadError({
             message: `Failed to load config from DB: ${e}`,
-            path: "litetree.db",
+            path: "treemux.db",
           }),
       }),
 
-      save: (config: LitetreeConfig) =>
+      save: (config: TreemuxConfig) =>
         Effect.try({
           try: () => saveConfig(config),
           catch: (e) =>
             new ConfigWriteError({
               message: `Failed to save config to DB: ${e}`,
-              path: "litetree.db",
+              path: "treemux.db",
             }),
         }),
 
-      update: (fn: (config: LitetreeConfig) => LitetreeConfig) =>
+      update: (fn: (config: TreemuxConfig) => TreemuxConfig) =>
         Effect.try({
           try: () => {
             const current = loadConfig()
@@ -151,7 +151,7 @@ export const ConfigServiceLive = Layer.effect(
           catch: (e) =>
             new ConfigReadError({
               message: `Failed to update config in DB: ${e}`,
-              path: "litetree.db",
+              path: "treemux.db",
             }),
         }),
     }

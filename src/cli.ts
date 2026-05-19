@@ -22,7 +22,7 @@ export async function handleCli(args: string[]): Promise<boolean> {
     if (sub === "remove") {
       return runProjectRemove(args.slice(2))
     }
-    console.log("Usage: litetree project <add|list|remove>")
+    console.log("Usage: treemux project <add|list|remove>")
     return true
   }
 
@@ -53,7 +53,7 @@ async function runProjectAdd(args: string[]): Promise<boolean> {
   const repo = flags["repo"]
 
   if (!name || !repo) {
-    console.log('Usage: litetree project add --name <name> --repo <path> [--command claude|codex|opencode|custom] [--custom-command "cmd"] [--setup "cmd1" --setup "cmd2"]')
+    console.log('Usage: treemux project add --name <name> --repo <path> [--command claude|codex|opencode|custom] [--custom-command "cmd"] [--setup "cmd1" --setup "cmd2"]')
     return true
   }
 
@@ -94,7 +94,7 @@ async function runProjectList(): Promise<boolean> {
       const svc = yield* ProjectService
       const projects = yield* svc.list()
       if (projects.length === 0) {
-        console.log("No projects registered. Add one with: litetree project add --name <name> --repo <path>")
+        console.log("No projects registered. Add one with: treemux project add --name <name> --repo <path>")
         return
       }
       for (const p of projects) {
@@ -113,7 +113,7 @@ async function runProjectList(): Promise<boolean> {
 async function runProjectRemove(args: string[]): Promise<boolean> {
   const id = args[0]
   if (!id) {
-    console.log("Usage: litetree project remove <id>")
+    console.log("Usage: treemux project remove <id>")
     return true
   }
   await Effect.runPromise(

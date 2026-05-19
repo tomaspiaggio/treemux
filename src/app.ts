@@ -820,7 +820,7 @@ async function bootstrap(
       return
     }
 
-    // Strip bracketed-paste markers for litetree's own input handling
+    // Strip bracketed-paste markers for treemux's own input handling
     // (sidebar, modals, inline edit).
     if (hasOpen || hasClose) {
       str = str.replace(/\x1b\[2(00|01)~/g, "")
@@ -1106,11 +1106,11 @@ async function bootstrap(
     if (str === "\x1b[5;2~") { setScrollOffset(currentScrollOffset() + termRows()); return }
     if (str === "\x1b[6;2~") { setScrollOffset(currentScrollOffset() - termRows()); return }
 
-    // Wheel-as-arrows → litetree scroll. The host terminal (Ghostty, iTerm2,
+    // Wheel-as-arrows → treemux scroll. The host terminal (Ghostty, iTerm2,
     // etc.) in alt-screen with mouse reporting off translates mouse-wheel
     // notches into Up/Down arrow sequences. Many embedded TUIs (including
     // Claude Code) don't actually respond to PgUp/PgDn either, so we can't
-    // delegate scrolling to them. Instead, scroll litetree's own panel
+    // delegate scrolling to them. Instead, scroll treemux's own panel
     // offset directly when we detect a wheel arrow burst (≥2 arrows in one
     // chunk OR a second same-direction arrow within WHEEL_WINDOW_MS — far
     // faster than auto-repeat at ~33ms).

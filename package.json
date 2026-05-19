@@ -1,12 +1,12 @@
 {
-  "name": "litetree",
+  "name": "treemux",
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "litetree": "./bin/litetree.ts"
+    "treemux": "./bin/treemux.ts"
   },
   "scripts": {
-    "dev": "bun run bin/litetree.ts",
+    "dev": "bun run bin/treemux.ts",
     "typecheck": "tsc --noEmit",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true"
   },

@@ -21,15 +21,15 @@ bun run dev project remove <id>
 
 There are no unit tests. `tsc --noEmit` is the gate.
 
-The app stores all state under `~/.litetree/`:
-- `~/.litetree/litetree.db` — SQLite (projects, worktrees, app_settings)
-- `~/.litetree/worktrees/<project>/<branch>/` — actual git worktrees
+The app stores all state under `~/.treemux/`:
+- `~/.treemux/treemux.db` — SQLite (projects, worktrees, app_settings)
+- `~/.treemux/worktrees/<project>/<branch>/` — actual git worktrees
 
 When debugging in a non-TTY context, `process.stdin.setRawMode` is guarded (the app will still start, just won't capture keys).
 
 ## Architecture
 
-litetree is a Bun-only TUI that manages git worktrees, each with its own embedded PTY (Claude Code by default). The right panel shows the active worktree's terminal; the left sidebar lists worktrees grouped by project.
+treemux is a Bun-only TUI that manages git worktrees, each with its own embedded PTY (Claude Code by default). The right panel shows the active worktree's terminal; the left sidebar lists worktrees grouped by project.
 
 ### Rendering: raw ANSI, NOT Ink
 
@@ -40,7 +40,7 @@ Why custom ANSI instead of Ink: Ink's `logUpdate` owns stdout via erase+redraw, 
 Implications when editing rendering code:
 - Width/height come from `process.stdout.columns / rows`. `termCols()` accounts for sidebar visibility.
 - The paint loop is **dirty-flag-gated**: `paint()` returns early unless `dirty === true` or there's new PTY data. Anything that changes visible state must call `markDirty()`.
-- Mouse reporting (`\x1b[?1000h` + SGR `?1006h`) is **toggled per-focus**: enabled in sidebar/modal, disabled in terminal focus so the host's native drag-to-select / Cmd+Click on URLs work without a modifier. With reporting off in alt-screen, the host terminal translates the wheel into bursts of plain arrow-key sequences. `onTerminalInput` detects those bursts (2+ arrows in one chunk OR same-direction arrows within `WHEEL_WINDOW_MS` of each other — faster than auto-repeat) and rewrites them into `setScrollOffset` calls so litetree's own panel scrolls; a single arrow with no recent prior arrow is treated as a real keypress and forwarded to the embedded PTY so option-list navigation still works. Shift+↑/↓ and Shift+PageUp/PageDown also scroll the panel offset directly.
+- Mouse reporting (`\x1b[?1000h` + SGR `?1006h`) is **toggled per-focus**: enabled in sidebar/modal, disabled in terminal focus so the host's native drag-to-select / Cmd+Click on URLs work without a modifier. With reporting off in alt-screen, the host terminal translates the wheel into bursts of plain arrow-key sequences. `onTerminalInput` detects those bursts (2+ arrows in one chunk OR same-direction arrows within `WHEEL_WINDOW_MS` of each other — faster than auto-repeat) and rewrites them into `setScrollOffset` calls so treemux's own panel scrolls; a single arrow with no recent prior arrow is treated as a real keypress and forwarded to the embedded PTY so option-list navigation still works. Shift+↑/↓ and Shift+PageUp/PageDown also scroll the panel offset directly.
 - `?1002h` (button-motion tracking) is intentionally NOT used — it breaks native selection. We get away with click-only + wheel-only reporting.
 - Bracketed-paste mode (`?2004h`) is enabled; `onInput` strips the `\x1b[200~`/`\x1b[201~` markers so multi-line pastes arrive as plain text.
 
@@ -61,7 +61,7 @@ Composed in `src/index.ts`. Layers:
 
 ```
 DatabaseService (bun:sqlite, creates projects/worktrees/app_settings tables on boot)
-   └── ConfigService (load/save/update the full LitetreeConfig via DB)
+   └── ConfigService (load/save/update the full TreemuxConfig via DB)
          ├── ProjectService.{add,update,remove,list,get}
          └── WorktreeService.{create,remove,archive,restore,rename,list,listArchived,checkMerged}
 GitService (Bun.spawn wrappers; removeWorktree does rm -rf + git worktree prune, intentionally bypassing `git worktree remove` because it can hang)

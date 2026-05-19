@@ -174,7 +174,7 @@ function paintSidebar(
     out += SIDEBAR_BG + DIM_FG + SGR_DIM + hint + SGR_RESET
     out += SIDEBAR_BG + " ".repeat(Math.max(0, SIDEBAR_WIDTH - head.length - hint.length)) + SGR_RESET
   } else {
-    const brand = " litetree"
+    const brand = " treemux"
     const handle = " · @tomaspiaggio"
     out += moveTo(1, 1) + SIDEBAR_BG + HEADER_FG + SGR_BOLD + brand + SGR_RESET
     out += SIDEBAR_BG + DIM_FG + SGR_DIM + handle + SGR_RESET

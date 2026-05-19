@@ -13,7 +13,7 @@ export function Sidebar({ worktrees, activeId, selectedIndex, width }: SidebarPr
     return (
       <Box flexDirection="column" width={width} borderStyle="single" borderRight>
         <Box paddingX={1} marginTop={1}>
-          <Text bold>litetree</Text>
+          <Text bold>treemux</Text>
         </Box>
         <Box paddingX={1} marginTop={1} flexDirection="column">
           <Text dimColor>No worktrees yet</Text>
@@ -28,7 +28,7 @@ export function Sidebar({ worktrees, activeId, selectedIndex, width }: SidebarPr
   return (
     <Box flexDirection="column" width={width} borderStyle="single" borderRight>
       <Box paddingX={1}>
-        <Text bold>litetree</Text>
+        <Text bold>treemux</Text>
       </Box>
       <Box flexDirection="column" marginTop={1}>
         {worktrees.map((wt, i) => {

@@ -28,7 +28,7 @@ export class WorktreeEntry extends Schema.Class<WorktreeEntry>("WorktreeEntry")(
   sortOrder: Schema.optional(Schema.Number),
 }) {}
 
-export class LitetreeConfig extends Schema.Class<LitetreeConfig>("LitetreeConfig")({
+export class TreemuxConfig extends Schema.Class<TreemuxConfig>("TreemuxConfig")({
   projects: Schema.optionalWith(Schema.Array(Project), { default: () => [] }),
   worktrees: Schema.optionalWith(Schema.Array(WorktreeEntry), { default: () => [] }),
 }) {}

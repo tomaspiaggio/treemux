@@ -1,12 +1,12 @@
-# litetree
+# treemux
 
 A terminal UI for managing git worktrees with a coding agent embedded in each one. Spin up a new branch, get a worktree + a Claude Code (or Codex / OpenCode / custom) session running in it, switch between them instantly.
 
-![litetree screenshot](docs/screenshot.png)
+![treemux screenshot](docs/screenshot.png)
 
 ## What it does
 
-- Each worktree = its own branch + its own directory under `~/.litetree/worktrees/<project>/<branch>/` + its own long-running PTY.
+- Each worktree = its own branch + its own directory under `~/.treemux/worktrees/<project>/<branch>/` + its own long-running PTY.
 - Default command in a new worktree is `claude --dangerously-skip-permissions`. Subsequent opens add `--continue` so the conversation resumes.
 - You can also pick `codex --full-auto`, `opencode`, or a custom command.
 - Project setup scripts (e.g. `pnpm i`, `cp .env .env.local`) run automatically when a worktree is created.
@@ -19,7 +19,7 @@ Requires [Bun](https://bun.sh) (uses `bun:sqlite`, `Bun.spawn`).
 
 ```bash
 git clone <this repo>
-cd litetree
+cd treemux
 bun install
 bun run dev
 ```
@@ -80,15 +80,15 @@ bun run dev project remove <id>
 
 ## Selecting & copying from the embedded terminal
 
-When focus is on the terminal, litetree disables mouse reporting so your terminal's native drag-to-select + Cmd+C work normally. If you want even more room, press `Ctrl+B` from sidebar focus to hide the sidebar entirely — the terminal expands to fill the window.
+When focus is on the terminal, treemux disables mouse reporting so your terminal's native drag-to-select + Cmd+C work normally. If you want even more room, press `Ctrl+B` from sidebar focus to hide the sidebar entirely — the terminal expands to fill the window.
 
 If you prefer to keep the sidebar visible: in iTerm2 hold **Option** while dragging to do a rectangular selection that excludes the sidebar columns.
 
 ## Storage
 
-All state lives in `~/.litetree/`:
+All state lives in `~/.treemux/`:
 
-- `~/.litetree/litetree.db` — SQLite. Tables: `projects`, `worktrees`, `app_settings`.
-- `~/.litetree/worktrees/<project>/<branch>/` — actual git worktrees.
+- `~/.treemux/treemux.db` — SQLite. Tables: `projects`, `worktrees`, `app_settings`.
+- `~/.treemux/worktrees/<project>/<branch>/` — actual git worktrees.
 
 Permanent delete uses `rm -rf` + `git worktree prune`. It intentionally does **not** invoke `git worktree remove --force`, which has historically hung indefinitely on dirty trees or stale lock files.
