@@ -26,6 +26,7 @@ export class PtyService extends Context.Tag("PtyService")<
       rows: number
       cwd: string
       onExit?: () => void
+      onData?: () => void
     }) => Effect.Effect<PtyHandle, PtySpawnError>
     readonly get: (worktreeId: string) => PtyHandle | undefined
     readonly kill: (worktreeId: string) => Effect.Effect<void>
@@ -104,33 +105,52 @@ export const PtyServiceLive = Layer.effect(
 
           const fd: number = term.fd
           const pid: number = term.pid
-          const readBuf = Buffer.alloc(16384)
+          const READ_BUF_SIZE = 65536
+          const readBuf = Buffer.alloc(READ_BUF_SIZE)
           // StringDecoder buffers incomplete UTF-8 sequences across reads.
           // Without this, multi-byte chars (─, ·, emojis) split across two
           // polls get corrupted into replacement chars or weird substitutions.
           const decoder = new StringDecoder("utf8")
 
+          // Drain everything available in a single tick: a clear-screen +
+          // full redraw from Claude/Codex can easily exceed 64KB, and
+          // chunking it across many ticks (with a full repaint between)
+          // is what made init feel slow.
           const pollInterval = setInterval(() => {
-            try {
-              const n = fs.readSync(fd, readBuf, { offset: 0, length: 16384 })
-              if (n > 0) {
-                const data = decoder.write(readBuf.subarray(0, n) as Buffer)
-                terminal.write(data)
+            let chunks = ""
+            let hadData = false
+            for (;;) {
+              try {
+                const n = fs.readSync(fd, readBuf, { offset: 0, length: READ_BUF_SIZE })
+                if (n <= 0) break
+                chunks += decoder.write(readBuf.subarray(0, n) as Buffer)
+                hadData = true
+                // If we didn't fill the buffer, the kernel has no more
+                // bytes queued right now — stop draining and let the next
+                // tick pick up anything that arrives.
+                if (n < READ_BUF_SIZE) break
+              } catch (e: any) {
+                if (e.code === "EIO" && exited) {
+                  clearInterval(pollInterval)
+                  handles.delete(params.worktreeId)
+                  return
+                }
+                if (e.code === "EAGAIN") break
+                clearInterval(pollInterval)
+                return
+              }
+            }
+            if (hadData) {
+              // xterm.write parses asynchronously. Mark dirty + notify in
+              // the callback so the renderer sees post-parse buffer state.
+              terminal.write(chunks, () => {
                 for (let i = 0; i < terminal.rows; i++) {
                   dirtyLines.add(i)
                 }
-              }
-            } catch (e: any) {
-              if (e.code === "EIO" && exited) {
-                clearInterval(pollInterval)
-                handles.delete(params.worktreeId)
-                return
-              }
-              if (e.code !== "EAGAIN") {
-                clearInterval(pollInterval)
-              }
+                params.onData?.()
+              })
             }
-          }, 16)
+          }, 8)
 
           const handle: PtyHandle = {
             worktreeId: params.worktreeId,

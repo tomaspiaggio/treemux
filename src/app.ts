@@ -318,6 +318,16 @@ async function bootstrap(
             markDirty()
           }
         },
+        onData: () => {
+          // Paint immediately when this worktree is the active one — skips
+          // up to ~16ms of paint-loop wait per keystroke.
+          if (activeWorktreeId === worktreeId) {
+            dirty = true
+            paint()
+          } else {
+            markDirty()
+          }
+        },
       })
     )
     acquireLock(worktreeId, handle.pid)
@@ -1211,7 +1221,10 @@ async function bootstrap(
     }
   }
 
-  const paintLoop = setInterval(paint, 33)
+  // PTY data triggers paint() directly via onData, so this loop is mostly a
+  // fallback (spinner animation, time-based UI like toast expiry, off-screen
+  // worktrees that still need their dirty flag cleared eventually).
+  const paintLoop = setInterval(paint, 16)
   paint()
 
   // Background poll: re-fetch PR info every 30s so newly opened PRs show up
