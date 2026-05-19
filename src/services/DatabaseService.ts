@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises"
 import { paths } from "../utils/paths.js"
 import { ConfigWriteError } from "../models/Errors.js"
 
-const DB_PATH = paths.root + "/litetree.db"
+const DB_PATH = paths.root + "/treemux.db"
 
 export class DatabaseService extends Context.Tag("DatabaseService")<
   DatabaseService,

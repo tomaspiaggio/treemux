@@ -110,7 +110,7 @@ export const WorktreeServiceLive = Layer.effect(
             updatedAt: now,
           })
           yield* config.update((c) =>
-            new (c.constructor as typeof import("../models/Config.js").LitetreeConfig)({
+            new (c.constructor as typeof import("../models/Config.js").TreemuxConfig)({
               ...c,
               worktrees: [entry, ...c.worktrees],
             })
