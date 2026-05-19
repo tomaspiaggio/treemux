@@ -347,15 +347,14 @@ async function bootstrap(
 
   let mouseModeEnabled = false
   const syncMouseMode = () => {
-    // Mouse reporting stays on in all focuses. In terminal focus the host
-    // terminal would otherwise translate the wheel into arrow keys (alt-screen
-    // fallback), which get forwarded to the embedded app and navigate its
-    // prompts instead of scrolling our view. With reporting on, wheel comes
-    // through as SGR mouse events and handleMouse scrolls the panel locally;
-    // non-wheel clicks/drags are forwarded to the PTY. To do a native
-    // host-terminal selection inside the pane, hold Option (macOS) or Shift
-    // (most Linux terminals) while dragging.
-    const shouldEnable = true
+    // Enable mouse reporting only when NOT in terminal focus, so the
+    // embedded terminal's native drag-to-select / Cmd+Click on URLs work
+    // without needing a modifier. In terminal focus the host terminal
+    // translates the wheel into arrow keys (alt-screen fallback) — plain
+    // wheel therefore navigates the embedded app's prompts. To scroll the
+    // litetree view in terminal focus, use Shift+wheel (host terminal sends
+    // Shift+Up/Down, intercepted in onTerminalInput) or Shift+↑/↓.
+    const shouldEnable = focus !== "terminal" || modal.type !== "none"
     if (shouldEnable && !mouseModeEnabled) {
       process.stdout.write(MOUSE_ON)
       mouseModeEnabled = true
