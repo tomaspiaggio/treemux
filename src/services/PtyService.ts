@@ -25,6 +25,7 @@ export class PtyService extends Context.Tag("PtyService")<
       cols: number
       rows: number
       cwd: string
+      onExit?: () => void
     }) => Effect.Effect<PtyHandle, PtySpawnError>
     readonly get: (worktreeId: string) => PtyHandle | undefined
     readonly kill: (worktreeId: string) => Effect.Effect<void>
@@ -97,6 +98,7 @@ export const PtyServiceLive = Layer.effect(
             helperPath,
             (_code: number, _signal: number) => {
               exited = true
+              params.onExit?.()
             },
           )
 
@@ -121,6 +123,7 @@ export const PtyServiceLive = Layer.effect(
             } catch (e: any) {
               if (e.code === "EIO" && exited) {
                 clearInterval(pollInterval)
+                handles.delete(params.worktreeId)
                 return
               }
               if (e.code !== "EAGAIN") {
@@ -136,7 +139,11 @@ export const PtyServiceLive = Layer.effect(
             pid,
             write: (data) => {
               try {
-                fs.writeSync(fd, data)
+                const buf = typeof data === "string" ? Buffer.from(data) : data
+                const CHUNK = 4096
+                for (let off = 0; off < buf.length; off += CHUNK) {
+                  fs.writeSync(fd, buf.subarray(off, off + CHUNK))
+                }
               } catch {}
             },
             resize: (cols, rows) => {

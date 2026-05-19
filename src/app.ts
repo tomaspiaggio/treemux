@@ -102,6 +102,32 @@ async function bootstrap(
   const setSetting = (key: string, value: string) => {
     dbSvc.db.query("INSERT INTO app_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value)
   }
+
+  const acquireLock = (worktreeId: string, ptyPid: number) => {
+    dbSvc.db.query(
+      "INSERT INTO worktree_locks(worktree_id, pid, pty_pid) VALUES(?, ?, ?) ON CONFLICT(worktree_id) DO UPDATE SET pid = excluded.pid, pty_pid = excluded.pty_pid, locked_at = datetime('now')"
+    ).run(worktreeId, process.pid, ptyPid)
+  }
+
+  const releaseLock = (worktreeId: string) => {
+    dbSvc.db.query("DELETE FROM worktree_locks WHERE worktree_id = ? AND pid = ?").run(worktreeId, process.pid)
+  }
+
+  const releaseAllLocks = () => {
+    dbSvc.db.query("DELETE FROM worktree_locks WHERE pid = ?").run(process.pid)
+  }
+
+  const getLock = (worktreeId: string): { pid: number; pty_pid: number } | null => {
+    return dbSvc.db.query("SELECT pid, pty_pid FROM worktree_locks WHERE worktree_id = ?").get(worktreeId) as { pid: number; pty_pid: number } | null
+  }
+
+  const isProcessAlive = (pid: number): boolean => {
+    try { process.kill(pid, 0); return true } catch { return false }
+  }
+
+  const killProcess = (pid: number) => {
+    try { process.kill(pid, "SIGTERM") } catch {}
+  }
   let focus: "sidebar" | "terminal" | "modal" = "sidebar"
   let selectedIndex = 0
   let activeWorktreeId: string | null = null
@@ -117,6 +143,7 @@ async function bootstrap(
   let inlineEdit: { worktreeId: string; value: string } | null = null
   let lastSidebarClick: { y: number; time: number } | null = null
   let sidebarHidden = false
+  let ptyPasting = false
   const scrollOffsets = new Map<string, number>()
   // PR detection (via `gh pr list`). null = checked, no PR; undefined = not checked yet.
   const prNumbers = new Map<string, number | null>()
@@ -265,8 +292,16 @@ async function bootstrap(
     if (!wt) return
     const project = projects.find(p => p.id === wt.projectId)
     if (!project) return
+
+    const existingLock = getLock(worktreeId)
+    if (existingLock && existingLock.pid !== process.pid && existingLock.pty_pid > 0) {
+      if (isProcessAlive(existingLock.pty_pid)) {
+        killProcess(existingLock.pty_pid)
+      }
+    }
+
     const [cmd, args] = resolveCmd(project, worktreeId)
-    await Effect.runPromise(
+    const handle = await Effect.runPromise(
       ptySvc.spawn({
         worktreeId,
         command: cmd,
@@ -274,9 +309,18 @@ async function bootstrap(
         cols: termCols(),
         rows: termRows(),
         cwd: wt.path,
+        onExit: () => {
+          releaseLock(worktreeId)
+          if (activeWorktreeId === worktreeId && focus === "terminal") {
+            if (sidebarHidden) toggleSidebar()
+            focus = "sidebar"
+            showToast("Session ended")
+            markDirty()
+          }
+        },
       })
     )
-    // Mark the session as started so the next spawn uses --continue.
+    acquireLock(worktreeId, handle.pid)
     setSetting(sessionStartedKey(worktreeId), "1")
   }
 
@@ -342,6 +386,7 @@ async function bootstrap(
   const cleanup = () => {
     running = false
     clearInterval(paintLoop)
+    releaseAllLocks()
     for (const id of ptySvc.listActive()) {
       Effect.runSync(ptySvc.kill(id))
     }
@@ -500,6 +545,7 @@ async function bootstrap(
         await Effect.runPromise(
           Effect.gen(function* () {
             yield* ptySvc.kill(wt.id)
+            releaseLock(wt.id)
             yield* worktreeSvc.archive(wt.id)
           }).pipe(Effect.catchAll(() => Effect.void))
         )
@@ -708,10 +754,25 @@ async function bootstrap(
     let str = rawData.toString("utf-8")
     markDirty()
 
-    // Strip bracketed-paste markers. Terminals wrap pastes in
-    // \x1b[200~...\x1b[201~ so the app can distinguish typing from pasting.
-    // We just unwrap and treat the content as ordinary input.
-    if (str.includes("\x1b[200~") || str.includes("\x1b[201~")) {
+    // Large pastes arrive across multiple stdin chunks. Track state so
+    // every chunk between \x1b[200~ and \x1b[201~ is forwarded to the PTY.
+    const hasOpen = str.includes("\x1b[200~")
+    const hasClose = str.includes("\x1b[201~")
+
+    if (hasOpen && focus === "terminal" && !inlineEdit && modal.type === "none") {
+      ptyPasting = true
+    }
+
+    if (ptyPasting) {
+      const h = activeHandle()
+      if (h) h.write(str)
+      if (hasClose) ptyPasting = false
+      return
+    }
+
+    // Strip bracketed-paste markers for litetree's own input handling
+    // (sidebar, modals, inline edit).
+    if (hasOpen || hasClose) {
       str = str.replace(/\x1b\[2(00|01)~/g, "")
       if (str.length === 0) return
     }
@@ -837,9 +898,8 @@ async function bootstrap(
         archivedWorktrees = archivedWorktrees.filter(w => w.id !== wtId)
         applyView()
 
-        // Kill any PTY (no-op if not running) so git worktree remove won't
-        // get blocked by an open process holding files in the worktree.
         Effect.runSync(ptySvc.kill(wtId))
+        releaseLock(wtId)
 
         modal = { type: "none" }
         focus = "sidebar"
@@ -955,9 +1015,27 @@ async function bootstrap(
   }
 
   const toggleSidebar = () => {
+    const wasHidden = sidebarHidden
     sidebarHidden = !sidebarHidden
+    if (wasHidden) {
+      refresh().then(() => ghostCheck())
+    }
     const h = activeHandle()
     if (h) h.resize(termCols(), termRows())
+    markDirty()
+  }
+
+  const ghostCheck = () => {
+    for (const id of ptySvc.listActive()) {
+      const lock = getLock(id)
+      if (lock && lock.pid !== process.pid && isProcessAlive(lock.pid)) {
+        Effect.runSync(ptySvc.kill(id))
+        if (activeWorktreeId === id) {
+          focus = "sidebar"
+          showToast("Session taken over by another instance")
+        }
+      }
+    }
     markDirty()
   }
 
@@ -1089,6 +1167,15 @@ async function bootstrap(
   }
 
   // --- Initialize ---
+
+  // Purge locks left by crashed instances.
+  const staleLocks = dbSvc.db.query("SELECT worktree_id, pid, pty_pid FROM worktree_locks").all() as { worktree_id: string; pid: number; pty_pid: number }[]
+  for (const lock of staleLocks) {
+    if (!isProcessAlive(lock.pid)) {
+      if (lock.pty_pid > 0 && isProcessAlive(lock.pty_pid)) killProcess(lock.pty_pid)
+      dbSvc.db.query("DELETE FROM worktree_locks WHERE worktree_id = ?").run(lock.worktree_id)
+    }
+  }
 
   await refresh()
   availableEditors = detectEditors()

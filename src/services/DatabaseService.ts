@@ -28,6 +28,7 @@ export const DatabaseServiceLive = Layer.scoped(
     const db = new Database(DB_PATH)
     db.exec("PRAGMA journal_mode = WAL")
     db.exec("PRAGMA foreign_keys = ON")
+    db.exec("PRAGMA busy_timeout = 3000")
 
     db.exec(`
       CREATE TABLE IF NOT EXISTS projects (
@@ -67,6 +68,19 @@ export const DatabaseServiceLive = Layer.scoped(
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      )
+    `)
+
+    // Migration: drop old worktree_locks without pty_pid column
+    const hasCol = db.query("SELECT COUNT(*) as n FROM pragma_table_info('worktree_locks') WHERE name = 'pty_pid'").get() as { n: number } | null
+    if (hasCol && hasCol.n === 0) db.exec("DROP TABLE IF EXISTS worktree_locks")
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS worktree_locks (
+        worktree_id TEXT PRIMARY KEY REFERENCES worktrees(id) ON DELETE CASCADE,
+        pid INTEGER NOT NULL,
+        pty_pid INTEGER NOT NULL DEFAULT 0,
+        locked_at TEXT NOT NULL DEFAULT (datetime('now'))
       )
     `)
 
