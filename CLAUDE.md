@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow preferences
+
+- **Creating a PR**: when the user says "create a PR", write a nice description (Summary + Test plan), push the branch, and just reply with the PR URL so they can click it. No extra commentary.
+
 ## Commands
 
 ```bash
@@ -36,7 +40,7 @@ Why custom ANSI instead of Ink: Ink's `logUpdate` owns stdout via erase+redraw, 
 Implications when editing rendering code:
 - Width/height come from `process.stdout.columns / rows`. `termCols()` accounts for sidebar visibility.
 - The paint loop is **dirty-flag-gated**: `paint()` returns early unless `dirty === true` or there's new PTY data. Anything that changes visible state must call `markDirty()`.
-- Mouse reporting (`\x1b[?1000h` + SGR `?1006h`) is **toggled per-focus**: enabled in sidebar/modal, disabled in terminal focus. This is what allows native drag-to-select and Cmd+Click on URLs to keep working in Claude's pane.
+- Mouse reporting (`\x1b[?1000h` + SGR `?1006h`) is **toggled per-focus**: enabled in sidebar/modal, disabled in terminal focus so the host's native drag-to-select / Cmd+Click on URLs work without a modifier. With reporting off in alt-screen, the host terminal translates the wheel into bursts of plain arrow-key sequences. `onTerminalInput` detects those bursts (2+ arrows in one chunk OR same-direction arrows within `WHEEL_WINDOW_MS` of each other — faster than auto-repeat) and rewrites them into `setScrollOffset` calls so litetree's own panel scrolls; a single arrow with no recent prior arrow is treated as a real keypress and forwarded to the embedded PTY so option-list navigation still works. Shift+↑/↓ and Shift+PageUp/PageDown also scroll the panel offset directly.
 - `?1002h` (button-motion tracking) is intentionally NOT used — it breaks native selection. We get away with click-only + wheel-only reporting.
 - Bracketed-paste mode (`?2004h`) is enabled; `onInput` strips the `\x1b[200~`/`\x1b[201~` markers so multi-line pastes arrive as plain text.
 
