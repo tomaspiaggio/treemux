@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow preferences
+
+- **Creating a PR**: when the user says "create a PR", write a nice description (Summary + Test plan), push the branch, and just reply with the PR URL so they can click it. No extra commentary.
+
 ## Commands
 
 ```bash
@@ -36,7 +40,7 @@ Why custom ANSI instead of Ink: Ink's `logUpdate` owns stdout via erase+redraw, 
 Implications when editing rendering code:
 - Width/height come from `process.stdout.columns / rows`. `termCols()` accounts for sidebar visibility.
 - The paint loop is **dirty-flag-gated**: `paint()` returns early unless `dirty === true` or there's new PTY data. Anything that changes visible state must call `markDirty()`.
-- Mouse reporting (`\x1b[?1000h` + SGR `?1006h`) is **toggled per-focus**: enabled in sidebar/modal, disabled in terminal focus. This is what allows native drag-to-select and Cmd+Click on URLs to keep working in Claude's pane.
+- Mouse reporting (`\x1b[?1000h` + SGR `?1006h`) is **always on** (including in terminal focus). Wheel events are intercepted by `handleMouse` to scroll the panel locally; non-wheel clicks/drags in the terminal area are forwarded to the embedded PTY. Without reporting in terminal focus, the host terminal would translate the wheel into arrow keys (alt-screen fallback) and the embedded app would treat them as navigation. To do a native host-terminal selection inside the pane, hold Option (macOS Terminal/iTerm2) or Shift (most Linux terminals) while dragging.
 - `?1002h` (button-motion tracking) is intentionally NOT used — it breaks native selection. We get away with click-only + wheel-only reporting.
 - Bracketed-paste mode (`?2004h`) is enabled; `onInput` strips the `\x1b[200~`/`\x1b[201~` markers so multi-line pastes arrive as plain text.
 
