@@ -9,6 +9,7 @@ import { SetupService } from "./services/SetupService.js"
 import { DatabaseService } from "./services/DatabaseService.js"
 import { generateBranchName } from "./utils/names.js"
 import { detectEditors, openEditor, type EditorOption } from "./utils/editors.js"
+import { sampleMemory } from "./utils/memory.js"
 import type { Project, WorktreeEntry, CommandType } from "./models/Config.js"
 import {
   paintFrame,
@@ -156,6 +157,9 @@ async function bootstrap(
   // Setup script status per worktree. "running" while scripts execute,
   // dropped from the map when finished.
   const setupRunning = new Set<string>()
+  // RSS per worktree (bytes), sampled from `ps` every couple of seconds.
+  let memoryByWorktree: Map<string, number> = new Map()
+  let memoryTotal = 0
 
   const showErrorModal = (title: string, message: string) => {
     focus = "modal"
@@ -389,6 +393,8 @@ async function bootstrap(
       sidebarHidden,
       viewMode,
       archivedCount: archivedWorktrees.length,
+      memoryByWorktree,
+      memoryTotal,
     })
     process.stdout.write(frame)
   }
@@ -537,6 +543,33 @@ async function bootstrap(
         }
         const project = projects.find(p => p.name === name)
         if (project) createWorktree(project.id)
+      },
+    }
+  }
+
+  const handleSleep = () => {
+    const wt = worktrees[selectedIndex]
+    if (!wt) return
+    if (!ptySvc.get(wt.id)) {
+      showToast("Already sleeping")
+      return
+    }
+    focus = "modal"
+    modal = {
+      type: "confirm",
+      title: "Sleep worktree",
+      message: `Kill the running process for "${wt.displayName}"? It'll resume on next open. (y/n)`,
+      onConfirm: async () => {
+        modal = { type: "none" }
+        focus = "sidebar"
+        await Effect.runPromise(ptySvc.kill(wt.id).pipe(Effect.catchAll(() => Effect.void)))
+        releaseLock(wt.id)
+        if (activeWorktreeId === wt.id) {
+          activeWorktreeId = null
+          if (sidebarHidden) toggleSidebar()
+        }
+        showToast(`Slept ${wt.displayName}`)
+        markDirty()
       },
     }
   }
@@ -1005,6 +1038,7 @@ async function bootstrap(
         break
       case "n": handleNew(); break
       case "d": handleArchive(); break
+      case "z": handleSleep(); break
       case "o": handleEditorPicker(); break
       case "r": {
         const wt = worktrees[selectedIndex]
@@ -1230,6 +1264,32 @@ async function bootstrap(
   // Background poll: re-fetch PR info every 30s so newly opened PRs show up
   // without needing a manual refresh.
   setInterval(() => { fetchAllPRs() }, 30 * 1000)
+
+  // Memory sampling. One `ps` call per tick aggregates RSS over each PTY's
+  // process tree (PTY + child shell + Claude/codex + any spawned helpers).
+  const sampleAndStoreMemory = async () => {
+    const pidByWt = new Map<string, number>()
+    for (const id of ptySvc.listActive()) {
+      const h = ptySvc.get(id)
+      if (h) pidByWt.set(id, h.pid)
+    }
+    if (pidByWt.size === 0) {
+      if (memoryTotal !== 0) {
+        memoryByWorktree = new Map()
+        memoryTotal = 0
+        markDirty()
+      }
+      return
+    }
+    try {
+      const sample = await sampleMemory(pidByWt)
+      memoryByWorktree = sample.perWorktree
+      memoryTotal = sample.total
+      markDirty()
+    } catch { /* ignore */ }
+  }
+  void sampleAndStoreMemory()
+  setInterval(() => { void sampleAndStoreMemory() }, 2000)
 
   process.on("SIGINT", quit)
   process.on("SIGTERM", quit)

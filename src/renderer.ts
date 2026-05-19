@@ -78,13 +78,23 @@ export interface FrameOpts {
   sidebarHidden: boolean
   viewMode: "active" | "archived"
   archivedCount: number
+  memoryByWorktree: ReadonlyMap<string, number>
+  memoryTotal: number
+}
+
+function formatMem(b: number): string {
+  if (!Number.isFinite(b) || b <= 0) return ""
+  const MB = 1024 * 1024
+  const GB = MB * 1024
+  if (b >= GB) return `${(b / GB).toFixed(1)}GB`
+  return `${Math.round(b / MB)}MB`
 }
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 const spinner = (): string => SPINNER_FRAMES[Math.floor(Date.now() / 80) % SPINNER_FRAMES.length]!
 
 export function paintFrame(opts: FrameOpts): string {
-  const { worktrees, projects, selectedIndex, activeWorktreeId, focus, modal, handle, availableEditors, cols, rows, scrollOffset, inlineEdit, prNumbers, setupRunning, toast, sidebarHidden, viewMode, archivedCount } = opts
+  const { worktrees, projects, selectedIndex, activeWorktreeId, focus, modal, handle, availableEditors, cols, rows, scrollOffset, inlineEdit, prNumbers, setupRunning, toast, sidebarHidden, viewMode, archivedCount, memoryByWorktree, memoryTotal } = opts
   const contentHeight = rows - 2
   const termStartCol = sidebarHidden ? 1 : SIDEBAR_WIDTH + 2
   const termCols = sidebarHidden ? cols : cols - SIDEBAR_WIDTH - 1
@@ -92,7 +102,7 @@ export function paintFrame(opts: FrameOpts): string {
   let out = HIDE_CURSOR
 
   if (!sidebarHidden) {
-    out += paintSidebar(worktrees, projects, selectedIndex, activeWorktreeId, contentHeight, focus === "sidebar", inlineEdit, prNumbers, setupRunning, viewMode, archivedCount)
+    out += paintSidebar(worktrees, projects, selectedIndex, activeWorktreeId, contentHeight, focus === "sidebar", inlineEdit, prNumbers, setupRunning, viewMode, archivedCount, memoryByWorktree)
     for (let r = 1; r <= contentHeight; r++) {
       out += moveTo(r, SIDEBAR_WIDTH + 1) + BORDER_FG + "│" + SGR_RESET
     }
@@ -107,8 +117,8 @@ export function paintFrame(opts: FrameOpts): string {
 
   const selWt = worktrees[selectedIndex]
   const selProj = selWt ? projects.find(p => p.id === selWt.projectId) : undefined
-  out += paintDetailBar(selWt, selProj, rows - 1, cols, scrollOffset, toast)
-  out += paintStatusBar(focus, rows, cols, viewMode)
+  out += paintDetailBar(selWt, selProj, rows - 1, cols, scrollOffset, toast, selWt ? memoryByWorktree.get(selWt.id) ?? 0 : 0)
+  out += paintStatusBar(focus, rows, cols, viewMode, sidebarHidden ? memoryTotal : 0)
 
   if (modal.type !== "none") {
     out += paintModal(modal, availableEditors, cols, rows)
@@ -153,6 +163,7 @@ function paintSidebar(
   setupRunning: ReadonlySet<string>,
   viewMode: "active" | "archived",
   archivedCount: number,
+  memoryByWorktree: ReadonlyMap<string, number>,
 ): string {
   let out = ""
 
@@ -220,16 +231,19 @@ function paintSidebar(
           out += SIDEBAR_BG + " ".repeat(pad) + SGR_RESET
         }
       } else {
-        // Secondary line: indented project name in dim
+        // Secondary line: indented project name in dim, with memory on the right
         const projectName = project?.name ?? ""
         const indent = "      " // 6 spaces, aligns with name (after " N M ")
-        const maxProjLen = SIDEBAR_WIDTH - indent.length - 1
+        const memBytes = memoryByWorktree.get(wt.id) ?? 0
+        const memStr = memBytes > 0 ? formatMem(memBytes) : ""
+        const memSuffix = memStr ? ` ${memStr}` : ""
+        const maxProjLen = SIDEBAR_WIDTH - indent.length - memSuffix.length - 1
         const shown = projectName.slice(0, Math.max(0, maxProjLen))
-        const pad = Math.max(0, SIDEBAR_WIDTH - indent.length - shown.length)
+        const pad = Math.max(0, SIDEBAR_WIDTH - indent.length - shown.length - memSuffix.length)
         if (isSelected && focused) {
-          out += moveTo(r, 1) + SELECTED_BG + SELECTED_FG + SGR_DIM + indent + shown + " ".repeat(pad) + SGR_RESET
+          out += moveTo(r, 1) + SELECTED_BG + SELECTED_FG + SGR_DIM + indent + shown + " ".repeat(pad) + memSuffix + SGR_RESET
         } else {
-          out += moveTo(r, 1) + SIDEBAR_BG + DIM_FG + SGR_DIM + indent + shown + " ".repeat(pad) + SGR_RESET
+          out += moveTo(r, 1) + SIDEBAR_BG + DIM_FG + SGR_DIM + indent + shown + " ".repeat(pad) + memSuffix + SGR_RESET
         }
       }
     } else if (i === worktrees.length && isPrimary && viewMode === "active") {
@@ -421,7 +435,7 @@ function relTime(iso: string): string {
   return `${Math.floor(h / 24)}d ago`
 }
 
-function paintDetailBar(wt: WorktreeEntry | undefined, project: Project | undefined, row: number, cols: number, scrollOffset: number, toast: string | null): string {
+function paintDetailBar(wt: WorktreeEntry | undefined, project: Project | undefined, row: number, cols: number, scrollOffset: number, toast: string | null, memBytes: number): string {
   let out = moveTo(row, 1) + BAR_BG
 
   if (toast) {
@@ -442,6 +456,7 @@ function paintDetailBar(wt: WorktreeEntry | undefined, project: Project | undefi
     c += `  │  ${wt.status}`
     c += `  │  ${relTime(wt.updatedAt)}`
     if (project) c += `  │  ${project.name}`
+    if (memBytes > 0) c += `  │  mem ${formatMem(memBytes)}`
     if (scrollOffset > 0) c += `  │  SCROLL -${scrollOffset}`
     out += c.length < cols ? c + " ".repeat(cols - c.length) : c.slice(0, cols)
   }
@@ -450,7 +465,7 @@ function paintDetailBar(wt: WorktreeEntry | undefined, project: Project | undefi
   return out
 }
 
-function paintStatusBar(focus: string, row: number, _cols: number, viewMode: "active" | "archived"): string {
+function paintStatusBar(focus: string, row: number, cols: number, viewMode: "active" | "archived", memoryTotal: number): string {
   let out = moveTo(row, 1) + BAR_BG + BAR_FG + " "
 
   if (focus === "sidebar" && viewMode === "archived") {
@@ -459,12 +474,19 @@ function paintStatusBar(focus: string, row: number, _cols: number, viewMode: "ac
   } else if (focus === "sidebar") {
     out += shortcut("Enter", "open") + shortcut("1-9", "jump") + shortcut("n", "new")
     out += shortcut("r", "rename") + shortcut("y", "yank path") + shortcut("d", "archive")
-    out += shortcut("a", "view archived") + shortcut("s/S", "settings") + shortcut("q", "quit")
+    out += shortcut("z", "sleep") + shortcut("a", "archived") + shortcut("s/S", "settings") + shortcut("q", "quit")
   } else if (focus === "terminal") {
     out += shortcut("Ctrl+B", "sidebar / fullscreen") + shortcut("F1-F9", "jump") + shortcut("Ctrl+O", "editor") + shortcut("Shift+↑↓", "scroll")
   }
 
   out += CLEAR_RIGHT + SGR_RESET
+
+  // Right-aligned total memory readout when sidebar is hidden (terminal focus).
+  if (memoryTotal > 0) {
+    const memStr = `total mem ${formatMem(memoryTotal)} `
+    const col = Math.max(1, cols - memStr.length + 1)
+    out += moveTo(row, col) + BAR_BG + ACCENT + SGR_BOLD + memStr + SGR_RESET
+  }
   return out
 }
 
