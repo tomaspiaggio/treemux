@@ -144,6 +144,9 @@ async function bootstrap(
   let lastSidebarClick: { y: number; time: number } | null = null
   let sidebarHidden = false
   let ptyPasting = false
+  // Wheel-as-arrows detector: see onTerminalInput for the rationale.
+  let pendingArrow: { dir: "up" | "down"; str: string; timer: ReturnType<typeof setTimeout> } | null = null
+  const WHEEL_WINDOW_MS = 150
   const scrollOffsets = new Map<string, number>()
   // PR detection (via `gh pr list`). null = checked, no PR; undefined = not checked yet.
   const prNumbers = new Map<string, number | null>()
@@ -347,13 +350,11 @@ async function bootstrap(
 
   let mouseModeEnabled = false
   const syncMouseMode = () => {
-    // Enable mouse reporting only when NOT in terminal focus, so the
-    // embedded terminal's native drag-to-select / Cmd+Click on URLs work
-    // without needing a modifier. In terminal focus the host terminal
-    // translates the wheel into arrow keys (alt-screen fallback) — plain
-    // wheel therefore navigates the embedded app's prompts. To scroll the
-    // litetree view in terminal focus, use Shift+wheel (host terminal sends
-    // Shift+Up/Down, intercepted in onTerminalInput) or Shift+↑/↓.
+    // Mouse reporting is OFF in terminal focus so the host terminal's native
+    // drag-to-select / Cmd+Click on URLs work without a modifier. The host
+    // converts the wheel into arrow-key sequences (alt-screen fallback); we
+    // detect wheel bursts in onTerminalInput and translate them to PgUp/PgDn
+    // so the embedded app (Claude) scrolls its own scrollback.
     const shouldEnable = focus !== "terminal" || modal.type !== "none"
     if (shouldEnable && !mouseModeEnabled) {
       process.stdout.write(MOUSE_ON)
@@ -769,6 +770,7 @@ async function bootstrap(
     let str = rawData.toString("utf-8")
     markDirty()
 
+
     // Large pastes arrive across multiple stdin chunks. Track state so
     // every chunk between \x1b[200~ and \x1b[201~ is forwarded to the PTY.
     const hasOpen = str.includes("\x1b[200~")
@@ -1069,6 +1071,78 @@ async function bootstrap(
     // Shift+PageUp / Shift+PageDown = scroll by page
     if (str === "\x1b[5;2~") { setScrollOffset(currentScrollOffset() + termRows()); return }
     if (str === "\x1b[6;2~") { setScrollOffset(currentScrollOffset() - termRows()); return }
+
+    // Wheel-as-arrows → litetree scroll. The host terminal (Ghostty, iTerm2,
+    // etc.) in alt-screen with mouse reporting off translates mouse-wheel
+    // notches into Up/Down arrow sequences. Many embedded TUIs (including
+    // Claude Code) don't actually respond to PgUp/PgDn either, so we can't
+    // delegate scrolling to them. Instead, scroll litetree's own panel
+    // offset directly when we detect a wheel arrow burst (≥2 arrows in one
+    // chunk OR a second same-direction arrow within WHEEL_WINDOW_MS — far
+    // faster than auto-repeat at ~33ms).
+    //
+    // To avoid the first arrow of every wheel burst leaking through to the
+    // embedded app (which would briefly recall input history on every
+    // scroll), single arrows are *deferred* by WHEEL_WINDOW_MS. If a
+    // follow-up same-direction arrow arrives, the pair is treated as wheel
+    // and the deferred forward is canceled. Otherwise the held arrow is
+    // forwarded after the timeout — option-list navigation still works,
+    // just with imperceptible latency.
+    const upOnly = /^(?:\x1b\[A|\x1bOA)+$/.test(str)
+    const downOnly = /^(?:\x1b\[B|\x1bOB)+$/.test(str)
+    if (upOnly || downOnly) {
+      const dir: "up" | "down" = upOnly ? "up" : "down"
+      const arrowCount = str.length / 3
+
+      // Follow-up arrow same direction → wheel: cancel the pending forward
+      // and scroll, including the count from the pending arrow.
+      if (pendingArrow && pendingArrow.dir === dir) {
+        clearTimeout(pendingArrow.timer)
+        const pendingCount = pendingArrow.str.length / 3
+        pendingArrow = null
+        setScrollOffset(currentScrollOffset() + (dir === "up" ? pendingCount + arrowCount : -(pendingCount + arrowCount)))
+        return
+      }
+
+      // Multi-arrow chunk in one read → unambiguously a wheel burst.
+      if (arrowCount >= 2) {
+        setScrollOffset(currentScrollOffset() + (dir === "up" ? arrowCount : -arrowCount))
+        return
+      }
+
+      // Single arrow. If there's a stale pending arrow (different
+      // direction), flush it first so its forward order is preserved.
+      if (pendingArrow) {
+        clearTimeout(pendingArrow.timer)
+        const flushed = pendingArrow
+        pendingArrow = null
+        const h = activeHandle()
+        if (h) h.write(flushed.str)
+      }
+      const capturedStr = str
+      const capturedDir = dir
+      pendingArrow = {
+        dir: capturedDir,
+        str: capturedStr,
+        timer: setTimeout(() => {
+          pendingArrow = null
+          const h2 = activeHandle()
+          if (h2) h2.write(capturedStr)
+          markDirty()
+        }, WHEEL_WINDOW_MS),
+      }
+      return
+    }
+
+    // Any non-arrow input flushes a pending arrow so its order is preserved.
+    if (pendingArrow) {
+      clearTimeout(pendingArrow.timer)
+      const flushed = pendingArrow
+      pendingArrow = null
+      const h2 = activeHandle()
+      if (h2) h2.write(flushed.str)
+    }
+
     // Any other key resets scroll to follow-tail
     if (currentScrollOffset() > 0 && str.length === 1 && str >= " ") {
       setScrollOffset(0)

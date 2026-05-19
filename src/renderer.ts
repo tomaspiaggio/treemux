@@ -461,7 +461,7 @@ function paintStatusBar(focus: string, row: number, _cols: number, viewMode: "ac
     out += shortcut("r", "rename") + shortcut("y", "yank path") + shortcut("d", "archive")
     out += shortcut("a", "view archived") + shortcut("s/S", "settings") + shortcut("q", "quit")
   } else if (focus === "terminal") {
-    out += shortcut("Ctrl+B", "sidebar / fullscreen") + shortcut("F1-F9", "jump") + shortcut("Ctrl+O", "editor") + shortcut("Shift+↑↓ / Shift+wheel", "scroll")
+    out += shortcut("Ctrl+B", "sidebar / fullscreen") + shortcut("F1-F9", "jump") + shortcut("Ctrl+O", "editor")
   }
 
   out += CLEAR_RIGHT + SGR_RESET
