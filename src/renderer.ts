@@ -49,7 +49,7 @@ export type ModalState =
   | { type: "none" }
   | { type: "input"; title: string; placeholder: string; value: string; onSubmit: (v: string) => void }
   | { type: "textarea"; title: string; placeholder: string; value: string; onSubmit: (v: string) => void }
-  | { type: "select"; title: string; options: string[]; selectedIndex: number; onSelect: (v: string) => void }
+  | { type: "select"; title: string; options: string[]; selectedIndex: number; onSelect: (v: string) => void; onDelete?: (idx: number) => void; deletableCount?: number }
   | { type: "confirm"; title: string; message: string; onConfirm: () => void }
   | { type: "error"; title: string; message: string }
   | { type: "editor-picker"; worktreeId: string; selectedIndex: number }
@@ -575,6 +575,10 @@ function paintModal(modal: ModalState, editors: EditorOption[], screenCols: numb
           ? SELECTED_BG + SELECTED_FG + SGR_BOLD + " " + o + " " + SGR_RESET + MODAL_BG
           : " " + o
       )
+      if (modal.onDelete) {
+        lines.push("")
+        lines.push(DIM_FG + "Enter select · d delete · Esc cancel" + SGR_RESET + MODAL_BG)
+      }
       break
     case "confirm":
       title = modal.title

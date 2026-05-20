@@ -529,7 +529,7 @@ async function bootstrap(
 
   const NEW_PROJECT_OPTION = "+ New project…"
 
-  const handleNew = () => {
+  const openProjectPicker = (selectedIndex = 0) => {
     if (projects.length === 0) {
       startOnboarding()
       return
@@ -539,7 +539,8 @@ async function bootstrap(
       type: "select",
       title: "Select project (or add new)",
       options: [...projects.map(p => p.name), NEW_PROJECT_OPTION],
-      selectedIndex: 0,
+      selectedIndex: Math.min(selectedIndex, projects.length),
+      deletableCount: projects.length,
       onSelect: (name) => {
         modal = { type: "none" }
         focus = "sidebar"
@@ -550,8 +551,48 @@ async function bootstrap(
         const project = projects.find(p => p.name === name)
         if (project) createWorktree(project.id)
       },
+      onDelete: (idx) => {
+        const project = projects[idx]
+        if (!project) return
+        const activeCount = activeWorktrees.filter(w => w.projectId === project.id).length
+        const archivedCount = archivedWorktrees.filter(w => w.projectId === project.id).length
+        const orphanSuffix =
+          activeCount + archivedCount === 0
+            ? ""
+            : ` (${activeCount} active, ${archivedCount} archived worktrees will be orphaned)`
+        focus = "modal"
+        modal = {
+          type: "confirm",
+          title: "Delete project",
+          message: `Delete project "${project.name}"?${orphanSuffix} (y/n)`,
+          onConfirm: async () => {
+            modal = { type: "none" }
+            try {
+              await Effect.runPromise(projectSvc.remove(project.id))
+              await refresh()
+              showToast(`Deleted project ${project.name}`)
+              markDirty()
+              if (projects.length === 0) {
+                focus = "sidebar"
+              } else {
+                openProjectPicker(Math.min(idx, projects.length - 1))
+              }
+            } catch (e) {
+              modal = {
+                type: "error",
+                title: "Delete failed",
+                message: `Could not delete project: ${String(e)}`,
+              }
+              markDirty()
+            }
+          },
+        }
+        markDirty()
+      },
     }
   }
+
+  const handleNew = () => openProjectPicker()
 
   const handleSleep = () => {
     const wt = worktrees[selectedIndex]
@@ -1264,6 +1305,8 @@ async function bootstrap(
           modal = { ...modal, selectedIndex: Math.min(modal.options.length - 1, modal.selectedIndex + 1) }
         } else if (str === "k" || str === "\x1b[A") {
           modal = { ...modal, selectedIndex: Math.max(0, modal.selectedIndex - 1) }
+        } else if (str === "d" && modal.onDelete && modal.selectedIndex < (modal.deletableCount ?? modal.options.length)) {
+          modal.onDelete(modal.selectedIndex)
         }
         break
 
