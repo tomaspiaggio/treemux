@@ -39,6 +39,7 @@ export class GitService extends Context.Tag("GitService")<
       branch: string,
       baseBranch: string
     ) => Effect.Effect<void, GitError>
+    readonly fetch: (repoPath: string, remote?: string) => Effect.Effect<void, GitError>
     readonly removeWorktree: (
       repoPath: string,
       worktreePath: string
@@ -57,6 +58,9 @@ export const GitServiceLive = Layer.succeed(GitService, {
     runGit(["worktree", "add", "-b", branch, destPath, baseBranch], repoPath).pipe(
       Effect.asVoid
     ),
+
+  fetch: (repoPath, remote = "origin") =>
+    runGit(["fetch", remote, "--quiet"], repoPath).pipe(Effect.asVoid),
 
   // Robust removal:
   //   1. rm -rf the directory directly (fast, can't hang waiting on git).

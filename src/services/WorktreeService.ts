@@ -92,11 +92,12 @@ export const WorktreeServiceLive = Layer.effect(
                 branch: params.branchName,
               }),
           })
+          yield* git.fetch(project.repoPath).pipe(Effect.catchAll(() => Effect.void))
           yield* git.addWorktree(
             project.repoPath,
             wtPath,
             params.branchName,
-            params.baseBranch ?? "main"
+            params.baseBranch ?? "origin/main"
           )
           const now = new Date().toISOString()
           const entry = new WorktreeEntry({
