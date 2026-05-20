@@ -90,6 +90,7 @@ export const ProjectServiceLive = Layer.effect(
           yield* config.update((c) => ({
             ...c,
             projects: c.projects.filter((p) => p.id !== projectId),
+            worktrees: c.worktrees.filter((w) => w.projectId !== projectId),
           }) as typeof c)
         }),
 
