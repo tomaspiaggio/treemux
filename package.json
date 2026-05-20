@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "bun run bin/treemux.ts",
+    "build": "bun build --compile bin/treemux.ts --outfile bin/tt && ln -sf $(pwd)/bin/tt /usr/local/bin/tt",
     "typecheck": "tsc --noEmit",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true"
   },

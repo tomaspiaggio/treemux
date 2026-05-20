@@ -1,3 +1,4 @@
+bin/tt
 node_modules/
 dist/
 build/
