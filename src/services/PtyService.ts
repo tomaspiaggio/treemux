@@ -4,6 +4,31 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { StringDecoder } from "node:string_decoder"
 
+function resolveNodePtyNative(): { ptyNodePath: string; spawnHelperPath: string } | null {
+  const platArch = `${process.platform}-${process.arch}`
+  const candidates: string[] = []
+  // Next to the compiled binary: bin/native/<plat>-<arch>/
+  const execDir = path.dirname(process.execPath)
+  candidates.push(path.join(execDir, "native", platArch))
+  candidates.push(path.join(execDir, "..", "native", platArch))
+  // Dev mode: original node_modules
+  try {
+    const pkg = require.resolve("node-pty/package.json")
+    candidates.push(path.join(path.dirname(pkg), "prebuilds", platArch))
+  } catch {}
+  for (const dir of candidates) {
+    const ptyNodePath = path.join(dir, "pty.node")
+    const spawnHelperPath = path.join(dir, "spawn-helper")
+    if (fs.existsSync(ptyNodePath) && fs.existsSync(spawnHelperPath)) {
+      try {
+        fs.chmodSync(spawnHelperPath, 0o755)
+      } catch {}
+      return { ptyNodePath, spawnHelperPath }
+    }
+  }
+  return null
+}
+
 
 export interface PtyHandle {
   readonly worktreeId: string
@@ -43,12 +68,22 @@ export const PtyServiceLive = Layer.effect(
     return {
       spawn: (params) =>
         Effect.gen(function* () {
-          const nativeMod = yield* Effect.tryPromise({
-            try: async () => {
-              // eslint-disable-next-line @typescript-eslint/no-var-requires
-              const { loadNativeModule } = require("node-pty/lib/utils.js") as { loadNativeModule: (name: string) => { module: any; dir: string } }
-              return loadNativeModule("pty")
+          const nativePaths = yield* Effect.try({
+            try: () => {
+              const resolved = resolveNodePtyNative()
+              if (!resolved) {
+                throw new Error(
+                  `Could not locate node-pty native files (pty.node + spawn-helper) for ${process.platform}-${process.arch}. Looked next to execPath (${path.dirname(process.execPath)}) and node_modules.`,
+                )
+              }
+              return resolved
             },
+            catch: (e) =>
+              new PtySpawnError({ message: `Failed to locate node-pty native: ${e}`, command: params.command }),
+          })
+
+          const ptyNative = yield* Effect.try({
+            try: () => require(nativePaths.ptyNodePath) as any,
             catch: (e) =>
               new PtySpawnError({ message: `Failed to load node-pty native: ${e}`, command: params.command }),
           })
@@ -59,13 +94,7 @@ export const PtyServiceLive = Layer.effect(
               new PtySpawnError({ message: `Failed to load @xterm/headless: ${e}`, command: params.command }),
           })
 
-          const ptyNative = nativeMod.module
-          const helperPath = path.resolve(
-            require.resolve("node-pty"),
-            "..",
-            nativeMod.dir,
-            "spawn-helper",
-          )
+          const helperPath = nativePaths.spawnHelperPath
 
           const terminal = new xtermMod.Terminal({
             cols: params.cols,
