@@ -46,7 +46,7 @@ const ok = () => ({ content: [{ type: "text" as const, text: "ok" }] })
 // prompt (the Ctrl+K hotkey, or `/mcp__treemux__create_pr` typed by hand).
 // Context-aware: targets the right base branch, updates an existing PR instead
 // of creating a duplicate, and folds in any project-specific conventions.
-function buildCreatePrPrompt(ctx: WorktreeContext | null): string {
+export function buildCreatePrPrompt(ctx: WorktreeContext | null): string {
   const base = ctx?.baseBranch ?? "the default branch"
   const lines: string[] = []
 

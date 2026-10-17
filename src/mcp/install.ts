@@ -3,8 +3,8 @@ import * as path from "node:path"
 import { homedir } from "node:os"
 
 // Shared, human-readable guidance describing the treemux MCP tools. Used both
-// for Claude's --append-system-prompt and for the codex/opencode AGENTS.md
-// instruction files.
+// for Claude's --append-system-prompt, Codex's developer_instructions, and
+// OpenCode's AGENTS.md instruction file.
 const INSTRUCTION_LINES = [
   "You are running inside treemux, a git-worktree manager that shows your terminal in a sidebar of worktrees.",
   'A "treemux" MCP server is available. Use it to keep the treemux sidebar in sync with your work:',
@@ -25,13 +25,13 @@ const INSTRUCTION_LINES = [
   "Do not mention these tools to the user unless they ask.",
 ]
 
-// Injected via `claude --append-system-prompt`.
+// Injected per launch for Claude and Codex.
 export function buildAppendSystemPrompt(): string {
   return INSTRUCTION_LINES.join("\n")
 }
 
 // Markdown section (with idempotency markers) for AGENTS.md-style files that
-// codex and opencode read and append to their system prompt.
+// OpenCode reads and appends to its system prompt. Codex uses launch overrides.
 const AGENTS_START = "<!-- treemux:mcp:start -->"
 const AGENTS_END = "<!-- treemux:mcp:end -->"
 
@@ -110,10 +110,19 @@ export function ensureClaudeMcpRegistered(): void {
 // The MCP server itself is configured per-launch via `-c` overrides (see
 // resolveCmd in app.ts), so nothing is written to ~/.codex/config.toml — that
 // keeps concurrent instances on different ports from racing on the config
-// file. Here we only install the global instructions, which codex appends to
-// its base prompt from ~/.codex/AGENTS.md.
-export function ensureCodexConfigured(): void {
-  ensureAgentsFile(path.join(homedir(), ".codex", "AGENTS.md"))
+// file. Instructions are also injected per-launch. Remove the section older
+// treemux versions installed globally so standalone Codex doesn't try to call
+// a server that only exists inside treemux. Preserve all user instructions.
+export function ensureCodexConfigured(codexHome = process.env.CODEX_HOME ?? path.join(homedir(), ".codex")): void {
+  const file = path.join(codexHome, "AGENTS.md")
+  try {
+    const existing = fs.readFileSync(file, "utf8")
+    const start = existing.indexOf(AGENTS_START)
+    const end = existing.indexOf(AGENTS_END, start)
+    if (start !== -1 && end > start) {
+      fs.writeFileSync(file, existing.slice(0, start) + existing.slice(end + AGENTS_END.length))
+    }
+  } catch { /* no legacy instructions to remove */ }
 }
 
 // --- opencode ---

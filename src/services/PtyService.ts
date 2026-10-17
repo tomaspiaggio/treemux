@@ -136,6 +136,18 @@ export const PtyServiceLive = Layer.effect(
 
           const fd: number = term.fd
           const pid: number = term.pid
+          const writeToChild = (data: string) => {
+            try {
+              const buf = Buffer.from(data)
+              for (let off = 0; off < buf.length; off += 4096) {
+                fs.writeSync(fd, buf.subarray(off, off + 4096))
+              }
+            } catch {}
+          }
+          // Headless xterm is the child's terminal, so its cursor-position and
+          // device-attribute replies must go back to the child, not stdout.
+          // Without this Codex waits for queries that can never complete.
+          const terminalReplies = terminal.onData(writeToChild)
           const READ_BUF_SIZE = 65536
           const readBuf = Buffer.alloc(READ_BUF_SIZE)
           // StringDecoder buffers incomplete UTF-8 sequences across reads.
@@ -188,15 +200,7 @@ export const PtyServiceLive = Layer.effect(
             terminal,
             dirtyLines,
             pid,
-            write: (data) => {
-              try {
-                const buf = typeof data === "string" ? Buffer.from(data) : data
-                const CHUNK = 4096
-                for (let off = 0; off < buf.length; off += CHUNK) {
-                  fs.writeSync(fd, buf.subarray(off, off + CHUNK))
-                }
-              } catch {}
-            },
+            write: writeToChild,
             resize: (cols, rows) => {
               try {
                 ptyNative.resize(fd, cols, rows)
@@ -206,6 +210,7 @@ export const PtyServiceLive = Layer.effect(
             kill: () => {
               clearInterval(pollInterval)
               try { process.kill(pid, "SIGTERM") } catch {}
+              terminalReplies.dispose()
               terminal.dispose()
               handles.delete(params.worktreeId)
             },
