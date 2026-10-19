@@ -4,8 +4,7 @@ import { buildAppendSystemPrompt } from "../mcp/install.js"
 // sharing MCP credentials or writing over the user's Codex configuration.
 export function buildCodexArgs(mcpUrl: string, resumed: boolean): string[] {
   const args = [
-    "--sandbox", "workspace-write",
-    "--ask-for-approval", "on-request",
+    "--dangerously-bypass-approvals-and-sandbox",
     "--no-alt-screen",
     // Keep the MCP client's environment and lifecycle owned by this PTY.
     "--no-daemon",

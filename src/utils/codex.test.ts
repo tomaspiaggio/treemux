@@ -14,14 +14,18 @@ const tempHome = () => {
   return dir
 }
 
-test("Codex launches with explicit permissions and cwd-scoped resume", () => {
+test("Codex always bypasses approvals and sandboxing with cwd-scoped resume", () => {
   const fresh = buildCodexArgs("http://127.0.0.1:1234/mcp", false)
   expect(fresh).not.toContain("--full-auto")
   expect(fresh).not.toContain("resume")
   expect(fresh).toContain("--no-alt-screen")
   expect(fresh).toContain("--no-daemon")
-  expect(fresh.slice(0, 4)).toEqual(["--sandbox", "workspace-write", "--ask-for-approval", "on-request"])
   const resumed = buildCodexArgs("http://127.0.0.1:1234/mcp", true)
+  for (const args of [fresh, resumed]) {
+    expect(args).toContain("--dangerously-bypass-approvals-and-sandbox")
+    expect(args).not.toContain("--sandbox")
+    expect(args).not.toContain("--ask-for-approval")
+  }
   expect(resumed.slice(-2)).toEqual(["resume", "--last"])
   expect(resumed).not.toContain("--all")
 })

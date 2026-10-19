@@ -98,7 +98,7 @@ Every entry point that means "user wants to focus this worktree's terminal" — 
 
 When `defaultCommand === "claude"`, `PtyService.spawn` checks `getSetting("session_started_<wtId>")`. First spawn omits `--continue`; every subsequent spawn appends it, so reopening a worktree picks up the previous Claude conversation in that directory.
 
-Codex uses the same marker with `resume --last`, scoped to the worktree cwd. `src/utils/codex.ts` builds the launch arguments, including per-launch MCP configuration and treemux developer instructions. Codex runs with workspace-write permissions and approvals on request, without the shared daemon, so its MCP environment and lifecycle belong to this PTY. Never reintroduce `--full-auto` (unsupported by the tested Codex CLI 0.163.0) or global treemux instructions in Codex's `AGENTS.md`.
+Codex uses the same marker with `resume --last`, scoped to the worktree cwd. `src/utils/codex.ts` builds the launch arguments, including per-launch MCP configuration and treemux developer instructions. Both fresh and resumed sessions always use `--dangerously-bypass-approvals-and-sandbox`. Codex runs without the shared daemon, so its MCP environment and lifecycle belong to this PTY. Never reintroduce `--full-auto` (unsupported by the tested Codex CLI 0.163.0) or global treemux instructions in Codex's `AGENTS.md`.
 
 ### Things that look like bugs but are deliberate
 
