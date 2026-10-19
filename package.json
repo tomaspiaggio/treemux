@@ -12,6 +12,7 @@
     "build:local": "bun build --compile bin/treemux.ts --outfile bin/tt && rm -rf ~/.local/bin/native && mkdir -p ~/.local/bin/native && cp -R node_modules/node-pty/prebuilds/. ~/.local/bin/native/ && cp bin/tt ~/.local/bin/tt && cp bin/tt ~/.local/bin/treemux",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:codex": "bun run scripts/codex-smoke.ts",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true"
   },
   "dependencies": {

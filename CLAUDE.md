@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Shared guidance for coding agents working in this repository. Codex discovers it through `AGENTS.md`.
 
 ## Workflow preferences
 
@@ -11,7 +11,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 bun install              # install (runs a postinstall that chmod+x's node-pty's spawn-helper)
 bun run dev              # run the TUI
-bun run typecheck        # tsc --noEmit (the only "test"/lint gate; strict mode + noUnusedLocals/Parameters)
+bun run typecheck        # tsc --noEmit (strict mode + noUnusedLocals/Parameters)
+bun test                 # regression tests
+bun run test:codex       # local Codex CLI + MCP + embedded-terminal smoke test; no model calls
 
 # Subcommands (handled before the TUI boots, by src/cli.ts):
 bun run dev project add --name <name> --repo <path> [--command claude|codex|opencode|custom] [--custom-command "cmd"] [--setup "cmd"...]
@@ -19,7 +21,7 @@ bun run dev project list
 bun run dev project remove <id>
 ```
 
-There are no unit tests. `tsc --noEmit` is the gate.
+Run typecheck and the regression tests before opening a PR. For Codex integration changes, also run `test:codex` with Codex CLI installed on PATH.
 
 The app stores all state under `~/.treemux/`:
 - `~/.treemux/treemux.db` — SQLite (projects, worktrees, app_settings)
@@ -92,9 +94,11 @@ Every entry point that means "user wants to focus this worktree's terminal" — 
 
 `handlePermanentDelete` mutates `activeWorktrees` + `archivedWorktrees` immediately and shows a "Deleted X" toast, then runs `worktreeSvc.remove(id)` in the background. On failure, the entry is spliced back into its original index and an error modal explains why. If you add another destructive operation, follow this pattern — `git worktree` commands have historically been the slowest/hangiest part of the pipeline.
 
-### Claude session resume
+### Agent session resume
 
 When `defaultCommand === "claude"`, `PtyService.spawn` checks `getSetting("session_started_<wtId>")`. First spawn omits `--continue`; every subsequent spawn appends it, so reopening a worktree picks up the previous Claude conversation in that directory.
+
+Codex uses the same marker with `resume --last`, scoped to the worktree cwd. `src/utils/codex.ts` builds the launch arguments, including per-launch MCP configuration and treemux developer instructions. Both fresh and resumed sessions always use `--dangerously-bypass-approvals-and-sandbox`. Codex runs without the shared daemon, so its MCP environment and lifecycle belong to this PTY. Never reintroduce `--full-auto` (unsupported by the tested Codex CLI 0.163.0) or global treemux instructions in Codex's `AGENTS.md`.
 
 ### Things that look like bugs but are deliberate
 

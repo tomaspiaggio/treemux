@@ -9,6 +9,8 @@ import { SetupService } from "./services/SetupService.js"
 import { DatabaseService } from "./services/DatabaseService.js"
 import { McpService } from "./services/McpService.js"
 import type { McpEvent, WorktreeContext, AgentStatus } from "./mcp/tools.js"
+import { buildCreatePrPrompt } from "./mcp/tools.js"
+import { buildCodexArgs } from "./utils/codex.js"
 import type { ReportedPr } from "./renderer.js"
 import {
   ensureClaudeMcpRegistered,
@@ -517,11 +519,7 @@ async function bootstrap(
         // token (TREEMUX_TOKEN env) to the X-Treemux-Token header, all via
         // per-launch -c overrides so nothing is written to ~/.codex/config.toml
         // (keeps concurrent instances on different ports from colliding).
-        return ["codex", [
-          "--full-auto",
-          "-c", `mcp_servers.treemux.url="${mcpSvc.url}"`,
-          "-c", `mcp_servers.treemux.env_http_headers={ "X-Treemux-Token" = "TREEMUX_TOKEN" }`,
-        ]]
+        return ["codex", buildCodexArgs(mcpSvc.url, resumed)]
       }
       case "opencode": return ["opencode", []]
       case "custom":
@@ -1492,12 +1490,18 @@ async function bootstrap(
       return
     }
     if (str === "\x0b") {
-      // Ctrl+K: inject the treemux `create_pr` MCP prompt as a slash command.
-      // treemux can't make the agent act via MCP (the server can't start a
-      // turn), so we type the command into the PTY exactly as the user would.
-      // The prompt body — incl. any per-project conventions — lives server-side.
+      // Codex doesn't understand Claude's MCP slash-command syntax. Paste
+      // the same context-aware prompt as a user turn instead.
       const h = activeHandle()
-      if (h) h.write("/mcp__treemux__create_pr\r")
+      const ctx = activeWorktreeId ? provideContext(activeWorktreeId) : null
+      if (h && ctx?.defaultCommand === "codex") {
+        h.write(`\x1b[200~${buildCreatePrPrompt(ctx)}\x1b[201~`)
+        // Submit separately so Codex doesn't fold Enter into the paste.
+        const worktreeId = activeWorktreeId
+        setTimeout(() => {
+          if (worktreeId && ptySvc.get(worktreeId) === h) h.write("\r")
+        }, 100)
+      } else if (h) h.write("/mcp__treemux__create_pr\r")
       return
     }
     if (str === "\x0f") { handleEditorPicker(); return }

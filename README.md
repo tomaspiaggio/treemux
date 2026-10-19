@@ -8,7 +8,7 @@ A terminal UI for managing git worktrees with a coding agent embedded in each on
 
 - Each worktree = its own branch + its own directory under `~/.treemux/worktrees/<project>/<branch>/` + its own long-running PTY.
 - Default command in a new worktree is `claude --dangerously-skip-permissions`. Subsequent opens add `--continue` so the conversation resumes.
-- You can also pick `codex --full-auto`, `opencode`, or a custom command.
+- You can also pick Codex CLI, `opencode`, or a custom command. Codex always runs with `--dangerously-bypass-approvals-and-sandbox`, and resumes the latest conversation in the worktree when reopened.
 - Project setup scripts (e.g. `pnpm i`, `cp .env .env.local`) run automatically when a worktree is created.
 - PR detection via `gh` — if you have `gh` installed and a PR exists for the branch, its number shows in the sidebar.
 - Archive is a soft-delete (status flip, files stay). A separate archived view lets you restore or permanently delete.
@@ -37,6 +37,23 @@ bun run dev project add --name myapp --repo /Users/you/code/myapp --command clau
 bun run dev project list
 bun run dev project remove <id>
 ```
+
+### Using Codex
+
+Install [Codex CLI](https://developers.openai.com/codex/cli) on your `PATH` and run `codex login` once. The integration is tested with Codex CLI 0.163.0; older releases may need an update to support `--no-daemon`.
+
+```bash
+bun run dev project add --name myapp --repo /Users/you/code/myapp --command codex
+bun run dev
+```
+
+For an existing project, press `s` in the sidebar and change its default command to `codex`. Put an already-running worktree to sleep with `z`, then reopen it to launch the new command.
+
+Each Codex session gets its own treemux MCP connection for worktree naming, status, notifications, and PR tracking. Launch overrides supply the server URL and instructions; the authentication token stays in the child environment. Your Codex login, model selection, `CODEX_HOME`, and repository `AGENTS.md` are used normally. treemux supplies `developer_instructions` for its integration during the launch, and removes only its own marked section left in the global `AGENTS.md` by older versions.
+
+Codex runs within the PTY without a shared daemon and in inline mode so its output remains scrollable. Both fresh and resumed sessions bypass approvals and sandboxing. `Ctrl+K` sends a project-aware PR request as a user message. Regular multiline pastes stay bracketed so embedded newlines don't submit a partial prompt. If MCP tools are missing, use `/mcp` in Codex to inspect the `treemux` connection.
+
+To verify the integration locally, run `bun run typecheck`, `bun test`, and `bun run test:codex`. The last command exercises the installed Codex parser, its real MCP client, and its interactive startup through treemux's PTY using temporary state. It does not require a login or make model requests.
 
 ### Install as a command (`tt` / `treemux`)
 
